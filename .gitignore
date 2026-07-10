@@ -1,0 +1,10 @@
+.env
+__pycache__/
+.venv/
+data/
+*.sqlite
+*.db
+tests/data
+data/raw/
+tests/data/cache/
+tests/ausleihe_exploration.ipynb
