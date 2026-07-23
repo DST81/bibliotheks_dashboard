@@ -127,8 +127,137 @@ with col_list:
 
 st.divider()
 
+ferien = config.get("ferien", [])
+
+st.subheader("3. 🏖 Ferien / Saisonzeiten")
+
+st.caption(
+    "Diese Zeiträume können später in Diagrammen "
+    "als farbige Bereiche angezeigt werden."
+)
+# -----------------------------
+# Vorhandene Ferien bearbeiten
+# -----------------------------
+
+delete_index = None
+
+for i, eintrag in enumerate(ferien):
+
+    c1, c2, c3, c4, c5, c6 = st.columns([3,1,1,1,1,0.8])
+
+    with c1:
+        ferien[i]["name"] = st.text_input(
+            "Bezeichnung",
+            value=eintrag["name"],
+            key=f"name_{i}"
+        )
+
+    with c2:
+        ferien[i]["start_kw"] = st.number_input(
+            "Start",
+            1,
+            53,
+            value=int(eintrag["start_kw"]),
+            key=f"start_{i}"
+        )
+
+    with c3:
+        ferien[i]["end_kw"] = st.number_input(
+            "Ende",
+            1,
+            53,
+            value=int(eintrag["end_kw"]),
+            key=f"ende_{i}"
+        )
+
+    with c4:
+        ferien[i]["farbe"] = st.color_picker(
+            "Farbe",
+            value=eintrag.get("farbe", "#FFE5B4"),
+            key=f"farbe_{i}"
+        )
+
+    with c5:
+        ferien[i]["aktiv"] = st.checkbox(
+            "Aktiv",
+            value=eintrag.get("aktiv", True),
+            key=f"aktiv_{i}"
+        )
+
+    with c6:
+        st.write("")
+        st.write("")
+        if st.button("🗑", key=f"del_{i}"):
+            delete_index = i
+
+if delete_index is not None:
+    ferien.pop(delete_index)
+    config["ferien"] = ferien
+
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+    st.rerun()
+
+# -----------------------------
+# Neue Ferien hinzufügen
+# -----------------------------
+
+st.markdown("### Neue Ferien hinzufügen")
+
+c1, c2, c3, c4 = st.columns([3,1,1,1])
+
+with c1:
+    neuer_name = st.text_input("Name")
+
+with c2:
+    neuer_start = st.number_input(
+        "Start-KW",
+        1,
+        53,
+        1
+    )
+
+with c3:
+    neues_ende = st.number_input(
+        "End-KW",
+        1,
+        53,
+        1
+    )
+
+with c4:
+    neue_farbe = st.color_picker(
+        "Farbe",
+        "#ffe5b4"
+    )
+
+if st.button("➕ Ferien hinzufügen"):
+
+    if neuer_name.strip():
+
+        ferien.append({
+            "name": neuer_name.strip(),
+            "start_kw": int(neuer_start),
+            "end_kw": int(neues_ende),
+            "farbe": neue_farbe,
+            "aktiv": True
+        })
+        config["ferien"] = ferien
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+
+            st.success("Ferien gespeichert.")
+            st.rerun()
+
+        except Exception as e:
+            st.error(f"Fehler beim Speichern: {e}")
+
+
+        st.rerun()
 # --- 3. Sichtbare Filter auswählen ---
-st.subheader("2. Sichtbare Filter konfigurieren")
+st.subheader("3. Sichtbare Filter konfigurieren")
 
 if all_columns:
     selected_filters = st.multiselect(
@@ -176,3 +305,5 @@ with col_preview:
         st.json(config)
 
 st.caption("Hinweis: Änderungen am Mapping werden erst wirksam, nachdem Sie auf 'Speichern' geklickt haben und das Dashboard neu geladen wurde.")
+
+

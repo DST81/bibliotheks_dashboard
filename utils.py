@@ -23,27 +23,72 @@ def get_latest_file(pattern_prefix):
     files.sort(key=extract_date, reverse=True)
     return files[0]
 
+def get_file_metadata(filepath):
+    """
+    Liest Metadaten aus Cache-Datei:
+    - Dateiname
+    - Datenstand aus Dateinamen
+    - cached_at aus JSON
+    """
+    metadata = {
+        "file": filepath.name,
+        "data_date": None,
+        "cached_at": None
+    }
+
+    # Datum aus Dateinamen
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", filepath.name)
+    if match:
+        metadata["data_date"] = match.group(1)
+
+    # cached_at aus JSON
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+
+        metadata["cached_at"] = cache.get("cached_at")
+
+    except Exception:
+        pass
+
+    return metadata
 def parse_date(series):
     return pd.to_datetime(series, errors="coerce", format="%m/%d/%Y")
 
 def parse_datetime(series):
     return pd.to_datetime(series, errors="coerce", format="%m/%d/%Y %H:%M:%S")
 
-@st.cache_data (ttl=3600) #Cache für 1 Stunde
+@st.cache_data(ttl=3600) # Cache für 1 Stunde
 def load_data():
     """
-    Lädt Ausleih-, Katalog- und Nutzerdaten.
-    Gibt ein Dictionary zurück: {'loans': df, 'catalog': df, 'users': df}
+    Lädt alle Datenquellen.
+
+    Rückgabe:
+    {
+        "loans": DataFrame,
+        "catalog": DataFrame,
+        "users": DataFrame,
+        "smartlibrary": DataFrame,
+        "metadata": {...}
+    }
     """
+    
+    # 1. Ergebnis-Dictionary initialisieren
     result = {
         "loans": None,
         "catalog": None,
-        "users": None
+        "users": None,
+        "smartlibrary": None,
+        "metadata": {}
     }
 
-    # --- 1. Ausleihdaten laden ---
+
+    # --- 3. Ausleihdaten laden ---
     ausleihe_file = get_latest_file("Ausleihe_Liste_")
     if ausleihe_file:
+        # WICHTIG: Datum extrahieren und speichern
+        result["metadata"]["loans"] = get_file_metadata(ausleihe_file)
+        
         try:
             with open(ausleihe_file, "r", encoding="utf-8") as f:
                 cache_loans = json.load(f)
@@ -72,42 +117,52 @@ def load_data():
         except Exception as e:
             st.error(f"Fehler beim Laden der Ausleihdaten: {e}")
     else:
-        st.warning("Keine Ausleih-Daten gefunden (Erwartetes Muster: 'Ausleihe_Liste_YYYY-MM-DD.json').")
+        st.warning("Keine Ausleih-Daten gefunden.")
 
-    # --- 2. Katalogdaten laden (für Medieninfos/Cover) ---
+    # --- 4. Katalogdaten laden ---
     katalog_file = get_latest_file("Katalogisieren_")
     if katalog_file:
+        result["metadata"]["catalog"] = get_file_metadata(katalog_file)
         try:
             with open(katalog_file, "r", encoding="utf-8") as f:
                 cache_kat = json.load(f)
+
             kat_records = cache_kat.get("records", [])
             kat_rows = []
+
             for record in kat_records:
                 row = record.get("fieldData", {}).copy()
-                if "NR Zugang" in row: 
+
+                if "NR Zugang" in row:
                     kat_rows.append(row)
-            
+
             if kat_rows:
                 df_catalog = pd.DataFrame(kat_rows)
-                if "NR Zugang" in df_catalog.columns and "URL_Cover" in df_catalog.columns:
-                    df_catalog = df_catalog[["NR Zugang", "URL_Cover"]].drop_duplicates()
-                    # Sicherstellen, dass NR Zugang String ist für den Join
-                    df_catalog["NR Zugang"] = df_catalog["NR Zugang"].astype(str).str.strip()
-                else:
-                    st.warning("Felder 'NR Zugang' oder 'URL_Cover' im Katalog nicht gefunden.")
-                    df_catalog = None
+
+                # Schlüssel bereinigen
+                df_catalog["NR Zugang"] = (
+                    df_catalog["NR Zugang"]
+                    .astype(str)
+                    .str.strip()
+                )
+
+                # Ein Medium = ein Katalogeintrag
+                df_catalog = df_catalog.drop_duplicates(
+                    subset="NR Zugang"
+                )
+
             else:
                 df_catalog = None
-            
+
             result["catalog"] = df_catalog
         except Exception as e:
             st.warning(f"Fehler beim Laden der Katalogdaten: {e}")
 
-    # --- 3. Nutzerdaten laden (NEU: Wichtig für Benutzergruppe & Wohnort) ---
-    # Hinweis: Passe das Präfix "Nutzer_" an, falls deine Datei anders heißt (z.B. "Benutzer_", "Adressen_")
+    # --- 5. Nutzerdaten laden ---
     nutzer_file = get_latest_file("Benutzer_Dashboard_") 
     
     if nutzer_file:
+        result["metadata"]["users"] = get_file_metadata(nutzer_file)
         try:
             with open(nutzer_file, "r", encoding="utf-8") as f:
                 cache_users = json.load(f)
@@ -120,8 +175,6 @@ def load_data():
             if user_rows:
                 df_users = pd.DataFrame(user_rows)
                 
-                # Wichtige Felder für den Datenqualitäts-Check sicherstellen
-                # Wir trimmen hier schon mal grob Leerzeichen, damit der Check fair ist
                 if "Benutzergruppe" in df_users.columns:
                     df_users["Benutzergruppe"] = df_users["Benutzergruppe"].astype(str).str.strip()
                 if "Wohnort" in df_users.columns:
@@ -133,11 +186,54 @@ def load_data():
         except Exception as e:
             st.error(f"Fehler beim Laden der Nutzerdaten: {e}")
     else:
-        st.warning("Keine Nutzer-Daten gefunden (Erwartetes Muster: 'Nutzer_YYYY-MM-DD.json').")
-        st.info("Hinweis: Der Datenqualitäts-Check für Benutzergruppen und Wohnorte benötigt diese Datei.")
+        st.warning("Keine Nutzer-Daten gefunden.")
+    # --- 6. SmartLibrary-Protokoll laden ---
+    smartlibrary_file = get_latest_file("SmartLibraryProtokoll_")
 
-    # --- 4. Join von Ausleihe und Katalog (Optional, falls für Analyse benötigt) ---
-    # Dies ändern wir nicht im Return-Dict, sondern fügen es dem Loans-DF hinzu, falls Katalog da ist
+    if smartlibrary_file:
+        result["metadata"]["smartlibrary"] = get_file_metadata(smartlibrary_file)
+
+        try:
+            with open(smartlibrary_file, "r", encoding="utf-8") as f:
+                cache = json.load(f)
+
+            records = cache.get("records", [])
+            rows = []
+
+            for record in records:
+                row = record.get("fieldData", {}).copy()
+                row["recordId"] = record.get("recordId")
+                rows.append(row)
+
+            if rows:
+                df_smartlibrary = pd.DataFrame(rows)
+
+                # Datumsfelder
+                if "erstellt" in df_smartlibrary.columns:
+                    df_smartlibrary["erstellt"] = parse_datetime(
+                        df_smartlibrary["erstellt"]
+                    )
+
+                # Nummer als String
+                if "Nummer" in df_smartlibrary.columns:
+                    df_smartlibrary["Nummer"] = (
+                        df_smartlibrary["Nummer"]
+                        .astype(str)
+                        .str.strip()
+                    )
+
+                result["smartlibrary"] = df_smartlibrary
+
+            else:
+                st.warning("SmartLibrary-Datei gefunden, aber keine Datensätze enthalten.")
+
+        except Exception as e:
+            st.error(f"Fehler beim Laden der SmartLibrary-Daten: {e}")
+
+    else:
+        st.warning("Keine SmartLibrary-Daten gefunden.")
+
+    # --- 7. Join von Ausleihe und Katalog ---
     if result["loans"] is not None and result["catalog"] is not None:
         df_loans = result["loans"]
         df_catalog = result["catalog"]
@@ -238,6 +334,8 @@ def apply_filters(df, date_range, selected_zweigstellen, selected_medienarten, s
         filtered = filtered[filtered["Kategorie Alter"].astype(str).isin(selected_kategorie_alter)]
         
     return filtered
+
+
 
 def apply_group_mapping(df, config):
     """

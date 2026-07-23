@@ -71,10 +71,13 @@ if df_swiss is not None and 'Ort_Validiert' not in df_users.columns:
         st.session_state['data']['users'] = df_users
 
 # --- HIER DIE NEUE FILTER-FUNKTION AUFRUFEN ---
-# Sie gibt den gefilterten DataFrame und die Filter-Infos zurück
-df_filtered, filter_info = get_sidebar_filters(df_users, prefix="user_dashboard")
 
-# Ab hier kannst du ganz normal mit df_filtered arbeiten
+# Wir nutzen eine Dummy-Variable '_' für den zweiten Rückgabewert (df_extra), der hier None ist.
+df_filtered, _, filter_info = get_sidebar_filters(df_users, prefix="bib_dashboard")
+#st.write("DEBUG Benutzer: Groups =", filter_info.get('groups'))
+#st.write("DEBUG Benutzer: URL Params =", st.query_params.to_dict())
+
+
 # Der Variable 'group_col' musst du jetzt aus filter_info holen:
 group_col = filter_info['group_col']
 

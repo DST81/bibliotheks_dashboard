@@ -7,6 +7,13 @@ from pathlib import Path
 import requests
 from requests.auth import HTTPBasicAuth
 from dotenv import load_dotenv
+import sys
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 # Lade .env Datei explizit
 load_dotenv()
@@ -179,7 +186,7 @@ def fetch_changed_records(base_url, token, layout, last_modified):
     while True:
         find_url = f"{base_url}/layouts/{layout}/_find"
         payload = {
-            "query": [{MODIFIED_FIELD: f">{last_modified_text}"}],
+            "query": [{field_name: f">{last_modified_text}"}],
             "limit": limit,
             "offset": offset,
             "sort": [{"fieldName": MODIFIED_FIELD, "sortOrder": "ascend"}]
