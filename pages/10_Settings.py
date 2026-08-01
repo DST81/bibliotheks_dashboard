@@ -2,7 +2,7 @@ import streamlit as st
 import json
 import pandas as pd
 from pathlib import Path
-from utils import load_data
+from src.utils import load_data
 
 st.set_page_config(page_title="Einstellungen", page_icon="⚙️", layout="wide")
 st.title("⚙️ Dashboard Einstellungen & Daten-Mapping")
@@ -42,7 +42,6 @@ config["filters"].setdefault("defaults", {})
 config.setdefault("group_mapping", {})
 config.setdefault("custom_replacements", {})
 
-st.divider()
 
 # Prüfen, ob Daten geladen wurden
 if 'data' not in st.session_state or st.session_state['data'] is None:
@@ -67,217 +66,213 @@ if df_ausleihe is not None and not df_ausleihe.empty:
     all_columns = [col for col in df_ausleihe.columns if df_ausleihe[col].nunique() < 50 and col not in ["Ausleihdatum", "Rückgabedatum", "recordId", "modId"]]
 
 # --- 2. Benutzergruppen zusammenfassen (Mapping) ---
-st.subheader("1. Benutzergruppen zusammenfassen")
-st.info("Fassen Sie mehrere technische Gruppen zu einer logischen Gruppe zusammen. Änderungen werden sofort gespeichert.")
 
-col_input, col_action, col_list = st.columns([2, 1, 3])
+with st.expander("1. Benutzergruppen zusammenfassen"):
+    st.info("Fassen Sie mehrere technische Gruppen zu einer logischen Gruppe zusammen. Änderungen werden sofort gespeichert.")
 
-with col_input:
-    new_group_name = st.text_input("Name der neuen Sammelgruppe", placeholder="z.B. Kinder & Jugendliche", key="input_name")
-    source_groups = st.multiselect(
-        "Quell-Gruppen auswählen",
-        options=available_groups,
-        help="Halten Sie Strg/Cmd gedrückt, um mehrere zu wählen.",
-        key="input_sources"
-    )
+    col_input, col_action, col_list = st.columns([2, 1, 3])
 
-with col_action:
-    st.write("")
-    st.write("")
-    # WICHTIG: Wir speichern hier sofort!
-    if st.button("➕ Hinzufügen", type="primary", use_container_width=True):
-        if not new_group_name or not source_groups:
-            st.error("Bitte Name und Gruppen auswählen.")
-        elif new_group_name in config["group_mapping"]:
-            st.warning(f"Gruppe '{new_group_name}' existiert bereits.")
-        else:
-            # 1. Zur Variable hinzufügen
-            config["group_mapping"][new_group_name] = source_groups
-            
-            # 2. SOFORT in die Datei schreiben (Auto-Save)
-            try:
-                CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-                with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                    json.dump(config, f, ensure_ascii=False, indent=2)
-                
-                st.success(f"✅ Gruppe '{new_group_name}' erstellt und gespeichert!")
-                st.rerun() # Neu laden, damit die Liste und die Variable aktualisiert werden
-            except Exception as e:
-                st.error(f"❌ Fehler beim Speichern: {e}")
-
-with col_list:
-    st.write("**Aktive Mapping-Regeln:**")
-    if config["group_mapping"]:
-        for name, sources in config["group_mapping"].items():
-            with st.container(border=True):
-                c1, c2 = st.columns([3, 1])
-                c1.markdown(f"**{name}**")
-                c1.caption(f"Enthält: {', '.join(sources)}")
-                # Auch beim Löschen sofort speichern
-                if c2.button("Löschen", key=f"del_{name}", use_container_width=True):
-                    del config["group_mapping"][name]
-                    try:
-                        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                            json.dump(config, f, ensure_ascii=False, indent=2)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Fehler beim Löschen: {e}")
-    else:
-        st.caption("Keine Regeln definiert.")
-
-st.divider()
-
-ferien = config.get("ferien", [])
-
-st.subheader("3. 🏖 Ferien / Saisonzeiten")
-
-st.caption(
-    "Diese Zeiträume können später in Diagrammen "
-    "als farbige Bereiche angezeigt werden."
-)
-# -----------------------------
-# Vorhandene Ferien bearbeiten
-# -----------------------------
-
-delete_index = None
-
-for i, eintrag in enumerate(ferien):
-
-    c1, c2, c3, c4, c5, c6 = st.columns([3,1,1,1,1,0.8])
-
-    with c1:
-        ferien[i]["name"] = st.text_input(
-            "Bezeichnung",
-            value=eintrag["name"],
-            key=f"name_{i}"
+    with col_input:
+        new_group_name = st.text_input("Name der neuen Sammelgruppe", placeholder="z.B. Kinder & Jugendliche", key="input_name")
+        source_groups = st.multiselect(
+            "Quell-Gruppen auswählen",
+            options=available_groups,
+            help="Halten Sie Strg/Cmd gedrückt, um mehrere zu wählen.",
+            key="input_sources"
         )
 
+    with col_action:
+        st.write("")
+        st.write("")
+        # WICHTIG: Wir speichern hier sofort!
+        if st.button("➕ Hinzufügen", type="primary", use_container_width=True):
+            if not new_group_name or not source_groups:
+                st.error("Bitte Name und Gruppen auswählen.")
+            elif new_group_name in config["group_mapping"]:
+                st.warning(f"Gruppe '{new_group_name}' existiert bereits.")
+            else:
+                # 1. Zur Variable hinzufügen
+                config["group_mapping"][new_group_name] = source_groups
+                
+                # 2. SOFORT in die Datei schreiben (Auto-Save)
+                try:
+                    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                        json.dump(config, f, ensure_ascii=False, indent=2)
+                    
+                    st.success(f"✅ Gruppe '{new_group_name}' erstellt und gespeichert!")
+                    st.rerun() # Neu laden, damit die Liste und die Variable aktualisiert werden
+                except Exception as e:
+                    st.error(f"❌ Fehler beim Speichern: {e}")
+
+    with col_list:
+        st.write("**Aktive Mapping-Regeln:**")
+        if config["group_mapping"]:
+            for name, sources in config["group_mapping"].items():
+                with st.container(border=True):
+                    c1, c2 = st.columns([3, 1])
+                    c1.markdown(f"**{name}**")
+                    c1.caption(f"Enthält: {', '.join(sources)}")
+                    # Auch beim Löschen sofort speichern
+                    if c2.button("Löschen", key=f"del_{name}", use_container_width=True):
+                        del config["group_mapping"][name]
+                        try:
+                            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                                json.dump(config, f, ensure_ascii=False, indent=2)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Fehler beim Löschen: {e}")
+        else:
+            st.caption("Keine Regeln definiert.")
+
+
+ferien = config.get("ferien", [])
+with st.expander("2. Ferien / Saisonzeiten"):
+    st.caption(
+        "Diese Zeiträume können später in Diagrammen "
+        "als farbige Bereiche angezeigt werden."
+    )
+    # -----------------------------
+    # Vorhandene Ferien bearbeiten
+    # -----------------------------
+
+    delete_index = None
+
+    for i, eintrag in enumerate(ferien):
+
+        c1, c2, c3, c4, c5, c6 = st.columns([3,1,1,1,1,0.8])
+
+        with c1:
+            ferien[i]["name"] = st.text_input(
+                "Bezeichnung",
+                value=eintrag["name"],
+                key=f"name_{i}"
+            )
+
+        with c2:
+            ferien[i]["start_kw"] = st.number_input(
+                "Start",
+                1,
+                53,
+                value=int(eintrag["start_kw"]),
+                key=f"start_{i}"
+            )
+
+        with c3:
+            ferien[i]["end_kw"] = st.number_input(
+                "Ende",
+                1,
+                53,
+                value=int(eintrag["end_kw"]),
+                key=f"ende_{i}"
+            )
+
+        with c4:
+            ferien[i]["farbe"] = st.color_picker(
+                "Farbe",
+                value=eintrag.get("farbe", "#B4F0FF"),
+                key=f"farbe_{i}"
+            )
+
+        with c5:
+            ferien[i]["aktiv"] = st.checkbox(
+                "Aktiv",
+                value=eintrag.get("aktiv", True),
+                key=f"aktiv_{i}"
+            )
+
+        with c6:
+            st.write("")
+            st.write("")
+            if st.button("🗑", key=f"del_{i}"):
+                delete_index = i
+
+    if delete_index is not None:
+        ferien.pop(delete_index)
+        config["ferien"] = ferien
+
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+
+        st.rerun()
+
+    # -----------------------------
+    # Neue Ferien hinzufügen
+    # -----------------------------
+
+    st.markdown("### Neue Ferien hinzufügen")
+
+    c1, c2, c3, c4 = st.columns([3,1,1,1])
+
+    with c1:
+        neuer_name = st.text_input("Name")
+
     with c2:
-        ferien[i]["start_kw"] = st.number_input(
-            "Start",
+        neuer_start = st.number_input(
+            "Start-KW",
             1,
             53,
-            value=int(eintrag["start_kw"]),
-            key=f"start_{i}"
+            1
         )
 
     with c3:
-        ferien[i]["end_kw"] = st.number_input(
-            "Ende",
+        neues_ende = st.number_input(
+            "End-KW",
             1,
             53,
-            value=int(eintrag["end_kw"]),
-            key=f"ende_{i}"
+            1
         )
 
     with c4:
-        ferien[i]["farbe"] = st.color_picker(
+        neue_farbe = st.color_picker(
             "Farbe",
-            value=eintrag.get("farbe", "#FFE5B4"),
-            key=f"farbe_{i}"
+            "#B4F0FF"
         )
 
-    with c5:
-        ferien[i]["aktiv"] = st.checkbox(
-            "Aktiv",
-            value=eintrag.get("aktiv", True),
-            key=f"aktiv_{i}"
-        )
+    if st.button("➕ Ferien hinzufügen"):
 
-    with c6:
-        st.write("")
-        st.write("")
-        if st.button("🗑", key=f"del_{i}"):
-            delete_index = i
+        if neuer_name.strip():
 
-if delete_index is not None:
-    ferien.pop(delete_index)
-    config["ferien"] = ferien
+            ferien.append({
+                "name": neuer_name.strip(),
+                "start_kw": int(neuer_start),
+                "end_kw": int(neues_ende),
+                "farbe": neue_farbe,
+                "aktiv": True
+            })
+            config["ferien"] = ferien
+            try:
+                with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(config, f, ensure_ascii=False, indent=2)
 
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
+                st.success("Ferien gespeichert.")
+                st.rerun()
 
-    st.rerun()
+            except Exception as e:
+                st.error(f"Fehler beim Speichern: {e}")
 
-# -----------------------------
-# Neue Ferien hinzufügen
-# -----------------------------
 
-st.markdown("### Neue Ferien hinzufügen")
-
-c1, c2, c3, c4 = st.columns([3,1,1,1])
-
-with c1:
-    neuer_name = st.text_input("Name")
-
-with c2:
-    neuer_start = st.number_input(
-        "Start-KW",
-        1,
-        53,
-        1
-    )
-
-with c3:
-    neues_ende = st.number_input(
-        "End-KW",
-        1,
-        53,
-        1
-    )
-
-with c4:
-    neue_farbe = st.color_picker(
-        "Farbe",
-        "#ffe5b4"
-    )
-
-if st.button("➕ Ferien hinzufügen"):
-
-    if neuer_name.strip():
-
-        ferien.append({
-            "name": neuer_name.strip(),
-            "start_kw": int(neuer_start),
-            "end_kw": int(neues_ende),
-            "farbe": neue_farbe,
-            "aktiv": True
-        })
-        config["ferien"] = ferien
-        try:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-
-            st.success("Ferien gespeichert.")
             st.rerun()
-
-        except Exception as e:
-            st.error(f"Fehler beim Speichern: {e}")
-
-
-        st.rerun()
 # --- 3. Sichtbare Filter auswählen ---
-st.subheader("3. Sichtbare Filter konfigurieren")
+with st.expander("3. Sichtbare Filter konfigurieren"):
+    if all_columns:
+        selected_filters = st.multiselect(
+            "Aktive Filter-Spalten",
+            options=all_columns,
+            default=[
+                f for f in config["filters"]["visible"]
+                if f in all_columns
+            ],
+            help="Diese Spalten erscheinen in der Sidebar."
+        )
 
-if all_columns:
-    selected_filters = st.multiselect(
-        "Aktive Filter-Spalten",
-        options=all_columns,
-        default=[
-            f for f in config["filters"]["visible"]
-            if f in all_columns
-        ],
-        help="Diese Spalten erscheinen in der Sidebar."
-    )
+        config["filters"]["visible"] = selected_filters
+    else:
+        st.warning("Keine geeigneten Filter-Spalten gefunden.")
 
-    config["filters"]["visible"] = selected_filters
-else:
-    st.warning("Keine geeigneten Filter-Spalten gefunden.")
-
-st.divider()
 
 st.subheader("💾 Abschluss")
-col_save, col_preview = st.columns([1, 2])
+col_save, col_preview = st.columns([1, 1])
 
 with col_save:
     if st.button("Einstellungen speichern & Dashboard neu laden", type="primary", use_container_width=True):

@@ -1,11 +1,13 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import json
 import altair as alt
 from pathlib import Path
 from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
-from utils import load_data, apply_filters, apply_config, load_swiss_locations,validate_and_clean_locations
+from src.utils import load_data,  apply_config, load_swiss_locations,validate_and_clean_locations
+from src.filters import get_sidebar_filters, build_filtered_data
 from components.ui import kpi_box
 import subprocess
 import sys
@@ -164,21 +166,20 @@ if df_ausleihe is None or df_ausleihe.empty:
 df_ausleihe = apply_config(df_ausleihe, config)
 
 # --- Sidebar Filter ---
-st.sidebar.header("Globale Filter")
-st.sidebar.info("Diese Filter gelten für alle Seiten des Dashboards.")
+# st.sidebar.header("Globale Filter")
+# st.sidebar.info("Diese Filter gelten für alle Seiten des Dashboards.")
 
 # Daten aktualisieren
-st.sidebar.divider()
-
+st.sidebar.subheader("Daten neuladen")
 if st.sidebar.button(
     "🔄 Daten aktualisieren",
     use_container_width=True,
     help="Lädt alle Daten neu aus dem Bibliothekssystem. Dies dauert einige Minuten."
 ):
 
-    with st.spinner("⏳ Daten werden aktualisiert... \n\nDies kann 2-5 Minuten dauern"):
+    with st.spinner("⏳ Daten werden aktualisiert... \n\nDies kann 4-5 Minuten dauern"):
         result= subprocess.run(
-            [sys.executable, "src/fetch_all_data.py"],
+            [sys.executable, "scripts/fetch_all_data.py"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -201,43 +202,39 @@ if st.sidebar.button(
     else:
         st.error("❌ Fehler beim Aktualisieren der Daten.")
         st.code(result.stderr)
+st.sidebar.divider()
 
-nur_erstausleihen = st.sidebar.checkbox("Nur Erstausleihen", value=False, help="Verlängerungen ausblenden")
+filtered_users, filtered_loans, filter_state = get_sidebar_filters(
+    df_users=data["users"],
+    df_extra=df_ausleihe,
+    prefix="global",
 
-today = date.today()
-date_range = None
-if "Ausleihdatum" in df_ausleihe.columns:
-    min_date = df_ausleihe["Ausleihdatum"].min()
-    max_date = df_ausleihe["Ausleihdatum"].max()
-    if pd.notna(min_date) and pd.notna(max_date):
-        min_date = min_date.date()
-        max_date = max_date.date()
-        years_back = default_filters.get("date_years_back", 2)
-        default_start = max(today - relativedelta(years=years_back), min_date)
-        date_range = st.sidebar.date_input("Ausleihdatum", value=(default_start, max_date))
+    enable_date_filter=True,
+    enable_first_loan_toggle=True,
 
-def get_dynamic_multiselect(label, column_name):
-    if column_name not in visible_filters or column_name not in df_ausleihe.columns:
-        return []
-    values = sorted([str(v) for v in df_ausleihe[column_name].dropna().unique() if str(v).strip() != ""])
-    default = default_filters.get(column_name, values)
-    return st.sidebar.multiselect(label, options=values, default=[v for v in default if v in values])
-
-sel_zweig = get_dynamic_multiselect("Zweigstelle", "Zweigstelle")
-sel_medien = get_dynamic_multiselect("Medienart", "Medienart")
-sel_gruppe = get_dynamic_multiselect("Benutzergruppe", "Benutzergruppe")
-sel_alter = get_dynamic_multiselect("Kategorie Alter", "Kategorie Alter")
-
-filtered_df = apply_filters(
-    df_ausleihe,
-    date_range,
-    sel_zweig,
-    sel_medien,
-    sel_gruppe,
-    sel_alter,
-    nur_erstausleihen
+    extra_filters_config=[
+        {
+            "col": "Zweigstelle",
+            "label": "Zweigstelle"
+        },
+        {
+            "col": "Medienart",
+            "label": "Medienart"
+        },
+        {
+            "col": "Kategorie Alter",
+            "label": "Kategorie Alter"
+        }
+    ]
 )
 
+filtered = build_filtered_data(
+    st.session_state["data"],
+    filtered_users,
+    filtered_loans,
+    filter_state
+)
+filtered_df = filtered["loans"]
 # Datumsfelder bereinigen
 filtered_df["Ausleihdatum"] = pd.to_datetime(
     filtered_df["Ausleihdatum"],
@@ -276,16 +273,63 @@ offene_medien = filtered_df[
     filtered_df["Rückgabedatum"].isna()
 ]
 
+# Offene Ausleihen nach Medienart
+offene_medienart = (
+    offene_medien
+    .groupby("Medienart_catalog")
+    .size()
+    .rename("Offen")
+    .to_frame()
+)
+
+offene_medienart["Überfällig"] = (
+    offene_medien[offene_medien["Ausleihe bis"] < heute]
+    .groupby("Medienart_catalog")
+    .size()
+)
+
+offene_medienart = offene_medienart.fillna(0)
+
+offene_medienart["Offen"] = offene_medienart["Offen"].astype(int)
+offene_medienart["Überfällig"] = offene_medienart["Überfällig"].astype(int)
+
+offene_medienart["Anteil"] = (
+    offene_medienart["Offen"]
+    / offene_medienart["Offen"].sum()
+    * 100
+).round(1)
+
+offene_medienart = (
+    offene_medienart
+    .sort_values("Offen", ascending=False)
+    .reset_index()
+    .rename(columns={"Medienart_catalog": "Medienart"})
+)
+# Offene Ausleihen nach Standort
+offene_standort = (
+    offene_medien['Standort(1)']
+    .fillna('Unbekannt')
+    .value_counts()
+    .rename_axis('Standort')
+    .reset_index(name='Offen')
+)
+offene_standort['Anteil'] = (
+    offene_standort['Offen']
+    /offene_standort['Offen'].sum()
+    *100
+).round(1)
+
 ueberfaellig = offene_medien[
     offene_medien["Ausleihe bis"] < heute
 ].shape[0]
 
 # --- KPIs ---
-st.subheader("Aktuelle Kennzahlen")
+st.subheader(f"Kennzahlen {aktuelles_jahr}")
 
 # Jahreswerte
 total_loans = len(df_aktuelles_jahr)
 total_loans_old = len(df_vorjahr)
+
 
 active_users = df_aktuelles_jahr["Ausleihperson"].nunique()
 active_users_old = df_vorjahr["Ausleihperson"].nunique()
@@ -398,11 +442,54 @@ with col4:
     )
 st.markdown("<br>", unsafe_allow_html=True)
 
+
 # Ausrichtung über Spaltenlayout
-links, mitte, rechts = st.columns([1, 1, 2])
+links, rechts = st.columns([1, 1])
+
+with links:
+    with st.expander("🔓 Details offene Ausleihen"):
+        tab1, tab2 = st.tabs(
+            [
+                "Medienarten",
+                "Standorte"
+            ]
+        )
+        with tab1:
+            st.dataframe(
+                offene_medienart,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Offen": st.column_config.NumberColumn(
+                        "Anzahl",
+                        format="%d"
+                    ),
+                    "Überfällig": st.column_config.NumberColumn("Überfällig"),
+                    "Anteil": st.column_config.NumberColumn(
+                        "Anteil",
+                        format="%.1f %%"
+                    )
+                }
+            )
+        with tab2:
+            st.dataframe(
+                offene_standort,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Offen": st.column_config.NumberColumn(
+                        "Anzahl",
+                        format="%d"
+                    ),
+                    "Anteil": st.column_config.NumberColumn(
+                        "Anteil",
+                        format="%.1f %%"
+                    )
+                }
+            )
 
 with rechts:
-    with st.expander("🆕 Details Neue Kund:innen nach Benutzergruppe"):
+    with st.expander("🆕 Details Kund:innen nach Benutzergruppe"):
 
         alle_gruppen = (
             pd.DataFrame({
@@ -479,154 +566,390 @@ if "Transaktion(1)" in df_ausleihe.columns:
     )
 else:
     df_ausleihe["Ausleihkanal"] = "Theke"
-# --- Trend Chart ---
-st.subheader("📈 Ausleihtrend (letzte 12 Monate)")
+
+
+# =====================================================
+# Ausleihtrend aktuelles Jahr
+# =====================================================
+
+st.subheader("📈 Ausleihtrend aktuelles Jahr")
 
 if "Ausleihdatum" in df_ausleihe.columns:
 
-    df_trend = apply_filters(
-        df_ausleihe,
-        None,
-        sel_zweig,
-        sel_medien,
-        sel_gruppe,
-        sel_alter,
-        nur_erstausleihen
+    heute = pd.Timestamp.today().normalize()
+    aktuelles_jahr = heute.year
+    vorjahr = aktuelles_jahr - 1
+
+    monate = range(1, 13)
+    monate_label = [
+        "Jan", "Feb", "Mär", "Apr",
+        "Mai", "Jun", "Jul", "Aug",
+        "Sep", "Okt", "Nov", "Dez"
+    ]
+
+    # --------------------------------------------------
+    # Basis-Daten: beide Jahre, mit Ausleihkanal
+    # (einmalig berechnet, statt getrennt für aktuell/Vorjahr)
+    # --------------------------------------------------
+
+    df_beide = filtered["loans_no_date"].copy()
+
+    if "Ausleihkanal" not in df_beide.columns:
+        if "Transaktion(1)" in df_beide.columns:
+            df_beide["Ausleihkanal"] = (
+                df_beide["Transaktion(1)"]
+                .apply(ermittle_kanal)
+            )
+        else:
+            df_beide["Ausleihkanal"] = "Theke"
+
+    df_beide = df_beide.dropna(subset=["Ausleihdatum"]).copy()
+
+    df_beide = df_beide[
+        df_beide["Ausleihdatum"].dt.year.isin([vorjahr, aktuelles_jahr])
+    ].copy()
+
+    df_beide["Jahr"] = df_beide["Ausleihdatum"].dt.year
+    df_beide["Monat"] = df_beide["Ausleihdatum"].dt.month
+
+    # Für die KPIs unten weiterhin nur das aktuelle Jahr
+    df_trend = df_beide[df_beide["Jahr"] == aktuelles_jahr].copy()
+
+    # --------------------------------------------------
+    # Monatswerte nach Kanal, für BEIDE Jahre
+    # --------------------------------------------------
+
+    bars_beide = (
+        df_beide
+        .groupby(["Jahr", "Monat", "Ausleihkanal"])
+        .size()
+        .reset_index(name="Ausleihen")
     )
 
-    df_trend = df_trend.dropna(subset=["Ausleihdatum"]).copy()
+    idx = pd.MultiIndex.from_product(
+        [[vorjahr, aktuelles_jahr], monate, ["Theke", "App"]],
+        names=["Jahr", "Monat", "Ausleihkanal"]
+    )
 
-    if not df_trend.empty:
-        # Immer die letzten 12 Monate ab heute anzeigen
-        heute = pd.Timestamp.today().normalize()
-        start_datum = (heute - relativedelta(months=11)).replace(day=1)
+    bars_beide = (
+        bars_beide
+        .set_index(["Jahr", "Monat", "Ausleihkanal"])
+        .reindex(idx, fill_value=0)
+        .reset_index()
+    )
 
-        df_trend = df_trend[
-            (df_trend["Ausleihdatum"] >= start_datum) &
-            (df_trend["Ausleihdatum"] <= heute)
-        ]
+    bars_beide["Monat_Label"] = [
+        monate_label[m-1]
+        for m in bars_beide["Monat"]
+    ]
+    bars_beide = bars_beide.rename(columns={"Ausleihkanal": "Kanal"})
 
-        trend = (
-            df_trend
-            .assign(
-                Monat=lambda x: x["Ausleihdatum"]
-                .dt.to_period("M")
-                .dt.to_timestamp()
-            )
-            .groupby(
-                [
-                    "Monat",
-                    "Ausleihkanal"
-                ]
-            )
-            .size()
-            .reset_index(name="Ausleihen")
+    # Aktuelles Jahr: keine zukünftigen Monate anzeigen
+    bars = bars_beide[
+        (bars_beide["Jahr"] == aktuelles_jahr)
+        & (bars_beide["Monat"] <= heute.month)
+    ].copy()
+    bars["Zeitraum"] = "Aktuell"
+
+    bars_vorjahr = bars_beide[bars_beide["Jahr"] == vorjahr].copy()
+    bars_vorjahr["Zeitraum"] = "Vorjahr"
+
+    # --------------------------------------------------
+    # Monatsgesamt + kumuliert (Vorjahr + aktuelles Jahr)
+    # --------------------------------------------------
+
+    line = (
+        df_beide
+        .groupby(["Jahr", "Monat"])
+        .size()
+        .reset_index(name="Ausleihen")
+    )
+    idx = pd.MultiIndex.from_product(
+        [[vorjahr, aktuelles_jahr], range(1, 13)],
+        names=["Jahr", "Monat"]
+    )
+
+    line = (
+        line
+        .set_index(["Jahr", "Monat"])
+        .reindex(idx, fill_value=0)
+        .reset_index()
+    )
+    line["Monat_Label"] = [
+        monate_label[m-1]
+        for m in line["Monat"]
+    ]
+
+    line["Kumuliert"] = (
+        line
+        .groupby("Jahr")["Ausleihen"]
+        .cumsum()
+    )
+
+    line["Linie"] = line["Jahr"].map({
+        vorjahr: "Vorjahr",
+        aktuelles_jahr: "Aktuelles Jahr"
+    })
+
+    vergleich = (
+        line.pivot(
+            index = "Monat",
+            columns = "Jahr",
+            values = "Kumuliert"
         )
+        .fillna(0)
+        .reset_index()
+    )
+    vergleich.columns = [
+        "Monat",
+        f"Kumuliert_{vorjahr}",
+        f"Kumuliert_{aktuelles_jahr}"
+    ]
 
-        # Alle 12 Monate erzeugen (inkl. Monate ohne Ausleihen)
-        alle_monate = pd.date_range(
-            start=start_datum,
-            end=heute,
-            freq="MS"
-        )
+    vergleich["Differenz"] = (
+        vergleich[f"Kumuliert_{aktuelles_jahr}"] -
+        vergleich[f"Kumuliert_{vorjahr}"]
+    )
+    vergleich["Differenz_%"] = (
+        vergleich["Differenz"]/
+        vergleich[f"Kumuliert_{vorjahr}"]
+        .replace(0,np.nan)
+        *100
+    )
 
-        # Monate + Kanäle vollständig machen
-        kanale = ["Theke", "App"]
+    line = line.merge(
+        vergleich,
+        on="Monat",
+        how="left"
+    )
 
-        vollstaendig = pd.MultiIndex.from_product(
-            [
-                alle_monate,
-                kanale
-            ],
-            names=[
-                "Monat",
-                "Ausleihkanal"
+    # NEU: Linie fürs aktuelle Jahr nur bis zum aktuellen Monat zeichnen,
+    # damit sie nicht künstlich flach bis Dezember weiterläuft
+    line = line[
+        (line["Jahr"] != aktuelles_jahr) | (line["Monat"] <= heute.month)
+    ].copy()
+
+    # --------------------------------------------------
+    # Balken aktuelles Jahr (gestapelt: Theke + App)
+    # --------------------------------------------------
+
+    BALKEN_BREITE_AKTUELL = 32
+    BALKEN_BREITE_VORJAHR = int(BALKEN_BREITE_AKTUELL * 0.75)  # etwas schmaler
+    VERSATZ_VORJAHR = -int(BALKEN_BREITE_AKTUELL * 0.5)       # 25% nach links versetzt
+
+    kanal_scale = alt.Scale(
+        domain=["Theke", "App"],
+        range=["#4C78A8", "#F58518"]
+    )
+    zeitraum_scale = alt.Scale(
+        domain=["Aktuell", "Vorjahr"],
+        range=[1.0, 0.4]  # Vorjahr deutlich transparenter, gleiche Farbe
+    )
+
+    chart_bar_aktuell = (
+        alt.Chart(bars)
+        .mark_bar(size=BALKEN_BREITE_AKTUELL)
+        .encode(
+            x=alt.X(
+                "Monat_Label:N",
+                sort=monate_label,
+                title="Monat"
+            ),
+            y=alt.Y(
+                "Ausleihen:Q",
+                title="Ausleihen pro Monat"
+            ),
+            color=alt.Color("Kanal:N", legend=None, scale=kanal_scale),
+            opacity=alt.Opacity("Zeitraum:N", title="Zeitraum", scale=zeitraum_scale, legend=None),
+            tooltip=[
+                alt.Tooltip("Monat_Label", title="Monat"),
+                alt.Tooltip("Kanal", title="Ausleihart"),
+                alt.Tooltip("Ausleihen", title="Ausleihen"),
             ]
         )
+    )
 
-        trend = (
-            trend
-            .set_index(
-                [
-                    "Monat",
-                    "Ausleihkanal"
-                ]
-            )
-            .reindex(
-                vollstaendig,
-                fill_value=0
-            )
-            .reset_index()
+    # --------------------------------------------------
+    # Balken Vorjahr (schmaler, nach links versetzt,
+    # gleiche Farben Theke/App, aber transparenter)
+    # --------------------------------------------------
+
+    chart_bar_vorjahr = (
+        alt.Chart(bars_vorjahr)
+        .mark_bar(
+            size=BALKEN_BREITE_VORJAHR,
+            xOffset=VERSATZ_VORJAHR
+        )
+        .encode(
+            x=alt.X("Monat_Label:N", sort=monate_label),
+            y=alt.Y("Ausleihen:Q"),
+            color=alt.Color("Kanal:N", scale=kanal_scale, legend=None),
+            opacity=alt.Opacity("Zeitraum:N", scale=zeitraum_scale),
+            tooltip=[
+                alt.Tooltip("Monat_Label", title="Monat"),
+                alt.Tooltip("Kanal", title="Kanal"),
+                alt.Tooltip("Zeitraum", title="Zeitraum"),
+                alt.Tooltip("Ausleihen", title="Ausleihen")
+            ]
+        )
+    )
+    # Balken-Layer zusammenfassen
+    bar_layer = alt.layer(chart_bar_vorjahr, chart_bar_aktuell)
+    
+    # --------------------------------------------------
+    # Linie kumuliert (aktuelles Jahr nur bis heute, Vorjahr komplett)
+    # --------------------------------------------------
+    col0, col1,col1_2, col2,col2_2, col3 = st.columns([0.5,1,1,1,1,2])
+
+    col1.markdown("🟦 **Theke**")
+    col1_2.markdown("🟧 **App**")
+    col2.markdown(f"""<span style="color:#5c78a4;"><strong>━</strong></span> <strong> Kumulierte Ausleihen {aktuelles_jahr}<strong>""",unsafe_allow_html=True)
+    col2_2.markdown(f"""<span style="color:#df8a39;"><strong>- - -</strong></span> <strong>Kumulierte Ausleihen {vorjahr}<strong>""",unsafe_allow_html=True)
+
+    chart_line = (
+        alt.Chart(line)
+        .mark_line(point=True, strokeWidth=3)
+        .encode(
+            x=alt.X(
+                "Monat_Label:N",
+                sort=monate_label
+            ),
+            y=alt.Y(
+                "Kumuliert:Q",
+                axis=alt.Axis(
+                    title="Gesamtausleihen",
+                    orient="right"
+                )
+            ),
+            color=alt.Color(
+                "Linie:N",
+                title="Gesamtausleihen",
+                scale=alt.Scale(
+                    domain=["Aktuelles Jahr","Vorjahr"],
+                    range=["#D62728","#888888"]
+                ),
+                legend=None
+            ),
+            strokeDash=alt.condition(
+                alt.datum.Jahr == vorjahr,
+                alt.value([6, 4]),
+                alt.value([1, 0])
+            ),
+            tooltip=[
+                alt.Tooltip("Jahr:N"),
+                alt.Tooltip("Monat_Label:N", title="Monat"),
+                alt.Tooltip("Ausleihen:Q", title="Ausleihen Monat"),
+                alt.Tooltip(f"Kumuliert_{aktuelles_jahr}:Q", title=f"Gesamtausleihen {aktuelles_jahr}"),
+                alt.Tooltip(
+                    f"Kumuliert_{vorjahr}:Q",
+                    title=f"Gesamtausleihen {vorjahr}"
+                ),
+                alt.Tooltip(
+                    "Differenz:Q",
+                    title = "Δ Vorjahr",
+                    format = "+.0f"
+                ),
+                alt.Tooltip(
+                    "Differenz_%:Q",
+                    title="Δ %",
+                    format="+.1f"
+                )
+            ]
+        )
+    )
+
+    # --------------------------------------------------
+    # Layering
+    # --------------------------------------------------
+
+    chart = (
+        alt.layer(
+            bar_layer,
+            chart_line
+        )
+        .resolve_scale(
+            y="independent"
+        )
+        .properties(
+            height=400
+        )
+    )
+
+    st.altair_chart(
+        chart,
+        use_container_width=True
+    )
+
+    # --------------------------------------------------
+    # KPI
+    # --------------------------------------------------
+
+    col1, col2 = st.columns(2)
+
+    app_quote = (
+        df_trend["Ausleihkanal"]
+        .eq("App")
+        .mean() * 100
+        if not df_trend.empty
+        else 0
+    )
+    df_vorjahr = df_beide[
+        (
+            (df_beide["Jahr"] == vorjahr)
+            & (df_beide["Ausleihdatum"].dt.month < heute.month)
+        )
+        |
+        (
+            (df_beide["Jahr"] == vorjahr)
+            & (df_beide["Ausleihdatum"].dt.month == heute.month)
+            & (df_beide["Ausleihdatum"].dt.day <= heute.day)
+        )
+    ].copy()
+
+    app_quote_vorjahr = (
+        df_vorjahr['Ausleihkanal']
+        .eq("App")
+        .mean()*100
+        if not df_vorjahr.empty
+        else 0
+    )
+    app_delta = app_quote - app_quote_vorjahr
+
+    ausleihen_aktuell = len(df_trend)
+    ausleihen_vorjahr =len(df_vorjahr)
+    ausleihen_delta=ausleihen_aktuell - ausleihen_vorjahr
+    veraenderung =(
+        ausleihen_delta/ ausleihen_vorjahr *100
+        if ausleihen_vorjahr > 0 else 0
+    )
+    with col1:
+        farbe = "#2E7D32" if app_delta >= 0 else "#C62828"
+        symbol = "🟢" if app_delta >= 0 else "🔴"
+
+        kpi_box(
+            "📱 App-Anteil",
+            f"{app_quote:.1f} %",
+            previous=f"{app_quote_vorjahr:.1f} %",
+            previous_label=str(vorjahr),
+            subtext=f"{symbol} {app_delta:+.1f} %-Pkt.",
+            color=farbe
         )
 
-        trend["Monat_Label"] = trend["Monat"].dt.strftime("%b %Y")
+    with col2:
+        farbe = "#2E7D32" if veraenderung >= 0 else "#C62828"
+        symbol = "🟢" if veraenderung >= 0 else "🔴"
+        kpi_box(
+            "📚 Ausleihen",
+            ausleihen_aktuell,
+            previous=ausleihen_vorjahr,
+            previous_label=f"{vorjahr}",
+            subtext = f"{symbol} {veraenderung:+.1f} %",
+            color =farbe
+    )
 
-        chart = (
-            alt.Chart(trend)
-            .mark_bar()
-            .encode(
-                x=alt.X(
-                    "Monat_Label:N",
-                    title="Monat",
-                    sort=trend["Monat_Label"].unique().tolist(),
-                    axis=alt.Axis(
-                        labelAngle=-45
-                    )
-                ),
-                y=alt.Y(
-                    "Ausleihen:Q",
-                    title="Anzahl Ausleihen"
-                ),
-                color=alt.Color(
-                    "Ausleihkanal:N",
-                    title="Kanal",
-                    scale=alt.Scale(
-                        domain=[
-                            "Theke",
-                            "App"
-                        ],
-                        range=[
-                            "#4C78A8",
-                            "#F58518"
-                        ]
-                    )
-                ),
-                tooltip=[
-                    alt.Tooltip(
-                        "Monat_Label:N",
-                        title="Monat"
-                    ),
-                    alt.Tooltip(
-                        "Ausleihkanal:N",
-                        title="Kanal"
-                    ),
-                    alt.Tooltip(
-                        "Ausleihen:Q",
-                        title="Ausleihen"
-                    )
-                ]
-            )
-            .properties(
-                height=350
-            )
-        )
+else:
+    st.write("Keine Daten vorhanden")
 
-        st.altair_chart(chart, use_container_width=True)
-
-    else:
-        st.info("Keine Daten vorhanden.")
-
-app_quote = (
-    df_trend["Ausleihkanal"]
-    .eq("App")
-    .mean()
-    * 100
-)
-
-st.metric(
-    "📱 App-Anteil",
-    f"{app_quote:.1f}%"
-)
 st.divider()
 st.markdown("""
 ### Navigation

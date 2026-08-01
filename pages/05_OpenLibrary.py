@@ -1,6 +1,8 @@
 import streamlit as st
 from components.sidebar import render_sidebar
-from utils import apply_filters, load_data, apply_group_mapping
+from components.ui import kpi_box
+from src.utils import  load_data, apply_group_mapping
+from src.filters import apply_filters
 import streamlit as st
 import json
 from pathlib import Path
@@ -48,6 +50,12 @@ if df_smart is None:
 df_users = apply_group_mapping(df_users, config)
 filters = render_sidebar(df_ausleihe, config)
 
+min_datum = df_smart['erstellt'].min()
+max_datum = df_smart['erstellt'].max()
+
+st.sidebar.caption(
+    f"Verfügbare Daten: {min_datum:%d.%m.%Y} bis {max_datum:%d.%m.%Y}"
+)
 filtered_df = apply_filters(
     df_ausleihe,
     filters["date_range"],
@@ -56,7 +64,19 @@ filtered_df = apply_filters(
     filters.get("Benutzergruppe", []),
     filters.get("Kategorie Alter", [])
 )
+# Datumsfelder in datetime umwandeln
+df_users["Ablauf_Beitrag"] = pd.to_datetime(
+    df_users["Ablauf_Beitrag"],
+    errors="coerce"
+)
 
+for i in range(1, 11):
+    col = f"Abo_bezahlt_bis({i})"
+    if col in df_users.columns:
+        df_users[col] = pd.to_datetime(
+            df_users[col],
+            errors="coerce"
+        )
 
 # =====================================================
 # DATEN VORBEREITEN
@@ -79,16 +99,18 @@ df_open["erstellt"] = pd.to_datetime(
     errors="coerce"
 )
 
-if filters["date_range"] is not None:
-    start, ende = filters["date_range"]
+date_range = filters.get("date_range")
 
+if isinstance(date_range, (list,tuple)) and len(date_range)==2:
+    start, ende = date_range
     start = pd.Timestamp(start)
     ende = pd.Timestamp(ende) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-
     df_open = df_open[
-        df_open["erstellt"].between(start, ende)
+        df_open['erstellt'].between(start,ende)
     ]
-
+if df_open.empty:
+    st.info("Für die gewählten Filter sind keine Zutritte vorhanden")
+    st.stop()
 # Nur gültige Einträge
 df_open = df_open[
     df_open["erstellt"].notna()
@@ -123,9 +145,78 @@ df_open["Wochentag"] = (
     .dt.dayofweek
     .map(wochentage)
 )
+
+# Openlibrary-Abos
+heute= pd.Timestamp.today().normalize()
+
+#Nur Benutzer mit OpenLibrary-Benutzergruppe oder Abo Open
+
+def hat_openlibrary(row):
+    #Benutzergrpppe
+    if 'open' in str(row.get('Benutzergruppe', '')).lower():
+        return True
+
+    # Abos 1-10
+    for i in range(1, 11):
+        abo = row.get(f'Abo_Name({i})')
+
+        if (
+            pd.notna(abo)
+            and 'open' in str(abo).lower()
+        ):
+            return True
+    return False
+
+def abo_abgelaufen(row):
+    # Abo Benutzerbeitrag (nur wenn Benutzergruppe OpenLibrary)
+    if (
+        'open' in str(row.get('Benutzergruppe', '')).lower()
+        and pd.notna(row.get('Ablauf_Beitrag'))
+        and row['Ablauf_Beitrag']< heute
+    ):
+        return True
+
+    # OpenLibrary-Abos
+    for i in range(1,11):
+        abo = row.get(f'Abo_Name({i})')
+        bezahlt_bis = row.get(f'Abo_bezahlt_bis({i})')
+
+        if (
+            pd.notna(abo)
+            and 'open' in str(abo).lower()
+            and pd.notna(bezahlt_bis)
+            and bezahlt_bis < heute
+        ):
+            return True
+    return False
+
+# Benutzer mit mindestens einem OpenLibrary-Zugang
+open_users = df_users[
+    df_users.apply(hat_openlibrary, axis=1)
+].copy()
+
+open_users['Abo_abgelaufen'] =open_users.apply(
+    abo_abgelaufen,
+    axis=1
+)
+
+anzahl_open_abos = len(open_users)
+anzahl_abgelaufen = open_users['Abo_abgelaufen'].sum()
+anzahl_aktiv = anzahl_open_abos - anzahl_abgelaufen
+
+quote_abgelaufen = (
+    anzahl_abgelaufen / anzahl_open_abos *100
+    if anzahl_open_abos > 0
+    else 0
+)
+    
 # =====================================================
 # KENNZAHLEN
 # =====================================================
+df_open["Jahr"] = df_open["erstellt"].dt.isocalendar().year
+df_open["Kalenderwoche"] = df_open["erstellt"].dt.isocalendar().week
+df_open["Wochentag"] = df_open["erstellt"].dt.day_name(locale="de_CH")
+
 
 gesamt_zutritte = len(df_open)
 
@@ -141,101 +232,52 @@ durchschnitt = round(
     gesamt_zutritte / zeitraum,
     1
 )
-
-c1, c2, c3, c4 = st.columns(4)
-
-c1.metric(
-    "🏛️ Zutritte",
-    f"{gesamt_zutritte:,}"
+wochen = (
+    df_open
+    .groupby(["Jahr","Kalenderwoche"])
+    .size()
 )
+durchschnitt_pro_woche = round(wochen.mean(),1)
 
-c2.metric(
-    "👤 Besucher",
-    f"{anzahl_besucher:,}"
+monate = (
+    df_open
+    .groupby([
+        df_open['erstellt'].dt.year,
+        df_open['erstellt'].dt.month
+    ])
+    .size()
 )
+durchschnitt_pro_monat = round(monate.mean(), 1)
+c1, c2 =st.columns(2)
+with c1:
+    kpi_box("🔑 Aktive OpenLibrary-Abos",anzahl_aktiv,previous=anzahl_open_abos,previous_label="Total registrierte:")
 
-c3.metric(
-    "📅 Zeitraum",
-    f"{zeitraum} Tage"
-)
+with c2:
+    farbe = "#C62828" if quote_abgelaufen > 10 else "#2E7D32"
+    kpi_box("⚠️ Abgelaufene Abos",anzahl_abgelaufen,previous=f"{quote_abgelaufen:.1f} %",previous_label="Anteil",color=farbe)
 
-c4.metric(
-    "📈 Ø Zutritte / Tag",
-    durchschnitt
-)
-col1, col2 = st.columns(2)
-# =====================================================
-# ZUTRITTE NACH STUNDE
-# =====================================================
-with col1:
-    st.subheader("🕒 Zutritte nach Stunde")
+st.markdown("<br>", unsafe_allow_html=True)
 
-    stunden = (
-        df_open
-        .groupby("Stunde")
-        .size()
-        .reset_index(name="Zutritte")
-    )
+c1, c2, c3 = st.columns(3)
 
-    chart = (
-        alt.Chart(stunden)
-        .mark_bar()
-        .encode(
-            x=alt.X("Stunde:O"),
-            y="Zutritte:Q",
-            tooltip=["Stunde","Zutritte"]
-        )
-        .properties(height=300)
-    )
+with c1:
+    kpi_box("🏛️ Total Zutritte im Zeitraum",gesamt_zutritte)
 
-    st.altair_chart(chart, use_container_width=True)
-# =====================================================
-# ZUTRITTE NACH WOCHENTAG
-# =====================================================
-with col2:
-    st.subheader("📅 Zutritte nach Wochentag")
+with c2:
+    kpi_box("👤 Total Besucher im Zeitraum",anzahl_besucher)
 
-    reihenfolge = [
-        "Montag",
-        "Dienstag",
-        "Mittwoch",
-        "Donnerstag",
-        "Freitag",
-        "Samstag",
-        "Sonntag"
-    ]
+with c3:
+    kpi_box("📅 Zeitraum",zeitraum, suffix= "Tage")
 
-    tage = (
-        df_open
-        .groupby("Wochentag")
-        .size()
-        .reindex(reihenfolge)
-        .fillna(0)
-        .reset_index(name="Zutritte")
-    )
 
-    chart = (
-        alt.Chart(tage)
-        .mark_bar()
-        .encode(
-            x=alt.X(
-                "Wochentag:N",
-                sort=reihenfolge
-            ),
-            y="Zutritte:Q",
-            tooltip=["Wochentag","Zutritte"]
-        )
-        .properties(height=300)
-    )
 
-    st.altair_chart(chart, use_container_width=True)
-
+st.markdown("<br>", unsafe_allow_html=True)  
 
 # =====================================================
 # ZUTRITTE PRO Woche
 # =====================================================
 
-st.subheader("📈 Zutritte pro Tag")
+st.subheader("📈 Zutritte nach Kalenderwoche - Woche auswählen")
 
 reihenfolge = [
     "Montag",
@@ -246,10 +288,6 @@ reihenfolge = [
     "Samstag",
     "Sonntag"
 ]
-df_open["Jahr"] = df_open["erstellt"].dt.isocalendar().year
-df_open["Kalenderwoche"] = df_open["erstellt"].dt.isocalendar().week
-df_open["Wochentag"] = df_open["erstellt"].dt.day_name(locale="de_CH")
-
 
 wochentage = (
     df_open
@@ -297,17 +335,25 @@ pro_woche["Woche"] = (
     + " – "
     + pro_woche["Wochenende"].dt.strftime("%d.%m.%Y")
 )
+
+letzte_woche= (
+    pro_woche
+    .sort_values(["Jahr", "Kalenderwoche"])
+    .iloc[-1]
+)
+
 ferien = [
     f
     for f in config.get("ferien", [])
     if f.get("aktiv", True)
 ]
-with st.expander("Ferien markieren"):
-    aktive_ferien = st.multiselect(
-        "Ferien aus-/abwählen",
-        options=[f["name"] for f in ferien],
-        default=[f["name"] for f in ferien]
-    )
+
+aktive_ferien = st.pills(
+    "Ferien aus-/abwählen",
+    options=[f["name"] for f in ferien],
+    selection_mode="multi",
+    default=[f["name"] for f in ferien]
+)
 
 ferien_bereiche = []
 
@@ -347,6 +393,7 @@ for f in ferien:
             "farbe": f["farbe"]
         })
 selection = alt.selection_point(
+    name="kw_select",
     fields=[
         "Jahr",
         "Kalenderwoche"
@@ -355,11 +402,17 @@ selection = alt.selection_point(
 )
 punkte = (
     alt.Chart(pro_woche)
-    .mark_circle(size=80)
+    .mark_circle(
+        size=100
+        )
     .encode(
         x="Kalenderwoche:Q",
         y="Zutritte:Q",
-        color="Jahr:N",
+        color=alt.condition(
+            selection,
+            alt.value("red"),
+            alt.Color("Jahr:N", legend=None)
+        ),
         tooltip=[
             "Jahr",
             alt.Tooltip("Kalenderwoche:Q", title="KW"),
@@ -369,20 +422,7 @@ punkte = (
     )
     .add_params(selection)
 )
-highlight = (
-    alt.Chart(pro_woche)
-    .mark_circle(
-        size=220,
-        filled=False,
-        stroke="red",
-        strokeWidth=3
-    )
-    .encode(
-        x="Kalenderwoche:Q",
-        y="Zutritte:Q"
-    )
-    .transform_filter(selection)
-)
+
 ferien_df = pd.DataFrame(ferien_bereiche)
 
 ferien_layer = alt.layer()
@@ -438,10 +478,19 @@ linien = (
     .add_params(selection)
 )
 
-
 detail = (
     alt.Chart(pro_tag)
     .transform_filter(selection)
+    .transform_window(
+        row_number='row_number()',
+        sort=[
+            alt.SortField("Jahr", order="descending"),
+            alt.SortField("Kalenderwoche", order="descending")
+        ]
+    )
+    .transform_filter(
+        "datum.row_number <8"
+    )
     .mark_bar(size=25)
     .encode(
         y=alt.Y(
@@ -450,7 +499,8 @@ detail = (
             title=""
         ),
         x=alt.X(
-            "Zutritte:Q"
+            "Zutritte:Q",
+            axis=alt.Axis(format="d")
         ),
         tooltip=[
             "Wochentag",
@@ -458,34 +508,214 @@ detail = (
         ]
     )
     .properties(
-        width=350,
-        height=250,
-        title="Verteilung innerhalb der gewählten Kalenderwoche"
+        width=400,
+        height=320
     )
 )
 chart = (
     alt.layer(
         ferien_layer,
         linien,
-        punkte,
-        highlight
+        punkte
     )
     .resolve_scale(
         color="independent"
     )
     .properties(
-        width=850,
-        height=420
+        width=600,
+        height=320,
+    )
+)
+titel_text = f"Verteilung der Zutritte vom  {letzte_woche['Woche']}"
+
+titel = (
+    alt.Chart(pro_woche)
+    .transform_filter(selection)
+    .transform_window(
+        row_number="row_number()",
+        sort=[
+            alt.SortField("Jahr", order="descending"),
+            alt.SortField("Kalenderwoche", order="descending")
+        ]
+    )
+    .transform_filter(
+        "datum.row_number == 1"
+    )
+    .transform_calculate(
+        label="'Verteilung der Zutritte vom ' + datum.Woche"
+    )
+    .mark_text(
+        fontSize=16,
+        fontWeight="bold",
+        align="left",
+        baseline="middle"
+    )
+    .encode(
+        text="label:N"
+    )
+    .properties(
+        width=100,
+        height=30
     )
 )
 gesamtchart = (
-    alt.vconcat(
+    alt.hconcat(
         chart,
+        titel,
         detail
     )
 )
 
 st.altair_chart(
     gesamtchart,
+    on_select="rerun",
     use_container_width=False
 )
+# =====================================================
+# ZUTRITTE NACH STUNDE
+# =====================================================
+reihenfolge = [
+    "Montag",
+    "Dienstag",
+    "Mittwoch",
+    "Donnerstag",
+    "Freitag",
+    "Samstag",
+    "Sonntag"
+]
+
+st.subheader("🕒 Zutritte nach Stunde")
+
+ausgewaehlte_tage = st.pills(
+    "Wochentage",
+    reihenfolge,
+    selection_mode='multi',
+    default=reihenfolge
+)
+stunden = (
+    df_open[
+        df_open["Wochentag"].isin(ausgewaehlte_tage)
+    ]
+    .groupby(["Stunde", "Wochentag"])
+    .size()
+    .reset_index(name="Zutritte")
+)
+
+stunden["Wochentag"] = pd.Categorical(
+    stunden["Wochentag"],
+    categories=reihenfolge,
+    ordered=True
+)
+stunden["Stunden_label"] = stunden["Stunde"].map(lambda x: f"{x:02d}:00")
+
+chart = (
+    alt.Chart(stunden)
+    .mark_bar()
+    .encode(
+        x=alt.X(
+            "Stunden_label:N",
+            sort=[f"{i:02d}:00" for i in range(24)],
+            title="Uhrzeit"
+        ),
+        xOffset=alt.XOffset(
+            "Wochentag:N",
+            sort=reihenfolge
+        ),
+        y=alt.Y(
+            "Zutritte:Q",
+            title="Zutritte"
+        ),
+        color=alt.Color(
+            "Wochentag:N",
+            sort=reihenfolge,
+            legend=alt.Legend(orient="bottom")
+        ),
+        tooltip=[
+            alt.Tooltip("Wochentag:N"),
+            alt.Tooltip("Stunden_label:N", title="Uhrzeit"),
+            alt.Tooltip("Zutritte:Q")
+        ]
+    )
+    .properties(height=320)
+)
+
+st.altair_chart(chart, use_container_width=True)
+# =====================================================
+# ZUTRITTE NACH WOCHENTAG
+# =====================================================
+
+st.subheader("📅 Zutritte nach Wochentag")
+
+
+tage = (
+    df_open
+    .groupby("Wochentag")
+    .size()
+    .reindex(reihenfolge)
+    .fillna(0)
+    .reset_index(name="Zutritte")
+)
+
+chart = (
+    alt.Chart(tage)
+    .mark_bar()
+    .encode(
+        x=alt.X(
+            "Wochentag:N",
+            sort=reihenfolge
+        ),
+        y="Zutritte:Q",
+        tooltip=["Wochentag","Zutritte"]
+    )
+    .properties(height=300)
+)
+
+st.altair_chart(chart, use_container_width=True)
+
+c1, c2, c3 = st.columns(3)
+with c1:
+    kpi_box("📈 Ø Zutritte / Tag",durchschnitt)
+
+with c2:
+    kpi_box("📅 Ø / Woche",durchschnitt_pro_woche)
+
+with c3:
+    kpi_box("🗓️ Ø / Monat",durchschnitt_pro_monat)
+
+stunden_tag = (
+    df_open
+    .groupby(["Wochentag", "Stunde"])
+    .size()
+    .reset_index(name="Zutritte")
+)
+
+stunden_tag["Wochentag"] = pd.Categorical(
+    stunden_tag["Wochentag"],
+    categories=reihenfolge,
+    ordered=True
+)
+
+heatmap = (
+    alt.Chart(stunden_tag)
+    .mark_rect()
+    .encode(
+        x=alt.X("Stunde:O", title="Stunde"),
+        y=alt.Y("Wochentag:N", sort=reihenfolge),
+        color=alt.Color("Zutritte:Q", title="Zutritte"),
+        tooltip=[
+            "Wochentag",
+            "Stunde",
+            "Zutritte"
+        ]
+    )
+    .properties(height=280)
+)
+
+st.altair_chart(heatmap, use_container_width=False)
+stunden_tag = (
+    df_open
+    .groupby(["Stunde", "Wochentag"])
+    .size()
+    .reset_index(name="Zutritte")
+)
+

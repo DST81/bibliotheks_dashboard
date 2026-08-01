@@ -1,11 +1,13 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
-from filters import get_sidebar_filters
 import numpy as np
-import time
 
-_start_zeit = time.perf_counter()
+from src.filters import get_sidebar_filters
+from components.ui import show_media_detail, kpi_box
+from src.bestand_analysis import berechne_bestand_mit_reihen
+
+
 
 st.set_page_config(
     page_title="Bestandsanalyse",
@@ -14,30 +16,12 @@ st.set_page_config(
 )
 
 
-def _log_zeit(schritt: str, dauer: float) -> None:
-    """
-    Schreibt Zeitmessungen zusätzlich ins Server-Terminal (dort, wo
-    `streamlit run` läuft) - unabhängig von der Debug-Checkbox in der UI.
-    Wichtig, weil das Anklicken der Checkbox selbst schon einen Rerun
-    auslöst und damit den Cache "aufwärmt" - der wirklich interessante,
-    allererste (kalte) Aufruf dieser Seite nach einem App-Neustart wird
-    dadurch in der UI-Anzeige verpasst, taucht hier im Terminal aber auf.
-    """
-    print(f"[Bestandsanalyse] {schritt}: {dauer:.2f}s")
-    verlauf = st.session_state.setdefault("bestand_ladezeiten_verlauf", [])
-    verlauf.append(f"{schritt}: {dauer:.2f}s")
-    st.session_state["bestand_ladezeiten_verlauf"] = verlauf[-20:]  # nur die letzten 20 behalten
+
+col1, col2 = st.columns([3,2])
+with col1:
+    st.title("📦 Bestandsanalyse")
 
 
-st.title("📦 Bestandsanalyse")
-
-debug_zeiten = st.sidebar.checkbox(
-    "🐢 Ladezeiten anzeigen (Debug)",
-    value=False,
-    key="bestand_debug_zeiten",
-    help="Zeigt in der Sidebar, wie lange die einzelnen Schritte brauchen - "
-         "hilfreich, um den tatsächlichen Flaschenhals bei langsamem Start zu finden."
-)
 
 st.sidebar.info(
     "ℹ️ Für einen schnellen Einstieg wurden Standardfilter gesetzt. "
@@ -51,7 +35,12 @@ st.sidebar.info(
 if "data" not in st.session_state:
     st.error("Keine Daten geladen.")
     st.stop()
-
+if "selected_medium" not in st.session_state:
+    st.session_state['selected_medium'] = None
+st.session_state.setdefault("selected_nr", None)
+st.session_state.setdefault("selection_source", None)
+if "table_key" not in st.session_state:
+    st.session_state.table_key=0
 
 data = st.session_state["data"]
 
@@ -66,13 +55,11 @@ if df_loans is None or df_books is None:
 # =====================================================
 # SPALTEN-DUPLIKATE BEREINIGEN
 # =====================================================
-# df_loans stammt aus einem früheren Merge und enthält "Medienart" doppelt
-# als "Medienart_x" / "Medienart_y". Für die Filter (extra_filters_config)
-# brauchen wir eine eindeutige Spalte "Medienart" -> wir verwenden _x.
-if "Medienart" not in df_loans.columns and "Medienart_x" in df_loans.columns:
-    df_loans["Medienart"] = df_loans["Medienart_x"]
-if "Kategorie Alter" not in df_loans.columns and "Kategorie Alter_x" in df_loans.columns:
-    df_loans["Kategorie Alter"] = df_loans["Kategorie Alter_x"]
+
+if "Medienart" not in df_loans.columns and "Medienart_catalog" in df_loans.columns:
+    df_loans["Medienart"] = df_loans["Medienart_catalog"]
+if "Kategorie Alter" not in df_loans.columns and "Kategorie Alter_catalog" in df_loans.columns:
+    df_loans["Kategorie Alter"] = df_loans["Kategorie Alter_catalog"]
 
 # =====================================================
 # FILTER
@@ -85,7 +72,7 @@ extra_filters_config = [
 ]
 
 # Filter anwenden, hier keine Zeitfilter, da nicht relevant
-_t_filter = time.perf_counter()
+
 _, df_loans_filtered, filter_info = get_sidebar_filters(
     df_users=None,
     df_extra=df_loans,
@@ -96,7 +83,25 @@ _, df_loans_filtered, filter_info = get_sidebar_filters(
     enable_first_loan_toggle=False,
     show_metrics=False
 )
-_log_zeit("get_sidebar_filters()", time.perf_counter() - _t_filter)
+
+# Aktuellen Filterzustand merken
+aktueller_filterzustand = tuple(
+    (
+        conf['col'],
+        tuple(sorted(st.session_state.get(f"bestand_extra_{conf['col']}", [])))
+    )
+    for conf in extra_filters_config
+)
+
+# Hat sich seit dem letzten Run etwas geändert?
+alter_filterzustand = st.session_state.get('bestand_filterzustand')
+
+if (
+    alter_filterzustand is not None
+    and alter_filterzustand != aktueller_filterzustand
+):
+    st.session_state['bestand_suche']=""
+st.session_state['bestand_filterzustand']=aktueller_filterzustand
 
 key = "NR Zugang"
 
@@ -109,289 +114,9 @@ if key not in df_books.columns:
     st.stop()
 
 
-# =====================================================
-# ROBUSTES, PERFORMANTES DATUMS-PARSING
-# =====================================================
-# Strategie: zuerst das/die erwartete(n) Format(e) exakt versuchen (das ist
-# der schnelle, vektorisierte C-Pfad von pandas). NUR für die Werte, die
-# dabei nicht geparst werden konnten, wird zusätzlich noch ein flexibler
-# Parser-Versuch (dayfirst=True) unternommen - das betrifft normalerweise
-# nur eine kleine Minderheit der Zeilen.
-#
-# Wichtig: format="mixed" oder dayfirst=True OHNE festes Format über die
-# GESAMTE Spalte zwingt pandas dazu, jeden einzelnen Wert einzeln per
-# dateutil zu parsen. Bei einem grossen Bibliotheksbestand (viele tausend
-# Zeilen) kann das spürbar langsam werden bis hin zum gefühlten
-# "Aufhängen" der App - das ist der wahrscheinlichste Kandidat für euer
-# Problem, falls die Spalten uneinheitlich formatiert sind.
-def erkenne_bestes_format(series: pd.Series, kandidaten: list, sample_size: int = 300):
-    """
-    Testet an einer kleinen Stichprobe, welches der Kandidaten-Formate am
-    besten zur Spalte passt, und gibt dieses zurück (oder None, falls keins
-    mindestens die Hälfte der Stichprobe erklärt).
-
-    Wichtig für die Performance: OHNE diesen Schritt würde bei falsch
-    geratenem Erstformat fast die GESAMTE Spalte im langsamen Fallback
-    (zeilenweises dateutil-Parsing weiter unten) landen - dann bringt die
-    ganze Format-Liste nichts. Die Stichprobe kostet nur Millisekunden,
-    spart aber im schlechtesten Fall mehrere Sekunden bis Minuten beim
-    Parsen der vollen Spalte.
-    """
-    werte = series.dropna().astype(str)
-    werte = werte[werte.str.strip() != ""]
-    if werte.empty:
-        return None
-
-    stichprobe = (
-        werte.sample(sample_size, random_state=42) if len(werte) > sample_size else werte
-    )
-
-    bestes_format = None
-    beste_quote = 0.0
-    for fmt in kandidaten:
-        quote = pd.to_datetime(stichprobe, format=fmt, errors="coerce").notna().mean()
-        if quote > beste_quote:
-            beste_quote = quote
-            bestes_format = fmt
-
-    return bestes_format if beste_quote >= 0.5 else None
 
 
-def robustes_datum(series: pd.Series, formate) -> pd.Series:
-    if series is None:
-        return pd.Series(dtype="datetime64[ns]")
-
-    s = series.copy()
-
-    if pd.api.types.is_datetime64_any_dtype(s):
-        return s
-
-    if isinstance(formate, str):
-        formate = [formate]
-
-    # Bei nur einem Format-Kandidaten ist die Stichproben-Erkennung
-    # überflüssig (z.B. "Datum der Aufnahme", dessen Format laut Bibliothek
-    # fix bekannt ist) - direkt den schnellen Pfad nehmen.
-    if len(formate) == 1:
-        formate_sortiert = formate
-    else:
-        bestes_format = erkenne_bestes_format(s, formate)
-        formate_sortiert = (
-            [bestes_format] + [f for f in formate if f != bestes_format]
-            if bestes_format else formate
-        )
-
-    ergebnis = pd.Series(pd.NaT, index=s.index)
-    rest_maske = pd.Series(True, index=s.index)
-
-    for fmt in formate_sortiert:
-        if not rest_maske.any():
-            break
-        geparst = pd.to_datetime(s[rest_maske], format=fmt, errors="coerce")
-        ergebnis.loc[rest_maske] = geparst
-        rest_maske = ergebnis.isna()
-
-    # Fallback nur für den kleinen Rest, der mit keinem Format passte
-    if rest_maske.any():
-        fallback = pd.to_datetime(s[rest_maske], errors="coerce", dayfirst=True)
-        ergebnis.loc[rest_maske] = fallback
-
-    return ergebnis
-
-
-# =====================================================
-# KERNBERECHNUNG - EINMAL FÜR DEN GESAMTEN KATALOG (GECACHT)
-# =====================================================
-# Der komplette Merge- und Score-Prozess hängt NICHT von den Sidebar-
-# Filtern (Standort/Medienart/Lesealter) ab - die Filter wählen nur aus,
-# WELCHE Zeilen am Ende angezeigt werden, ändern aber nicht, WIE der Score
-# für ein einzelnes Medium berechnet wird. Deshalb berechnen wir ihn genau
-# einmal für den kompletten Bestand und cachen das Ergebnis. Filter- oder
-# Schwellenwert-Änderungen lösen danach nur noch ein schnelles Filtern in
-# einem bereits fertigen DataFrame aus, statt bei jeder Slider-Bewegung
-# den kompletten Merge+Score-Prozess (inkl. Datums-Parsing) neu laufen zu
-# lassen. Das war vermutlich die Hauptursache für das "Aufhängen".
-#
-# hash_funcs={pd.DataFrame: id}: wir hashen die Eingabe-DataFrames nicht
-# über ihren Inhalt (das wäre bei grossen Tabellen selbst schon teuer),
-# sondern über ihre Objekt-Identität. Da df_books/df_loans einmal geladen
-# und danach im gleichen Session-State-Objekt wiederverwendet werden,
-# bleibt der Cache über Reruns hinweg gültig und wird nur neu berechnet,
-# wenn tatsächlich neue Daten geladen werden.
-@st.cache_data(show_spinner="Bestand wird analysiert ...", hash_funcs={pd.DataFrame: id})
-def berechne_bestand_scores(df_books_all: pd.DataFrame, df_loans_all: pd.DataFrame) -> pd.DataFrame:
-
-    df_bestand = df_books_all.copy()
-
-    # --- Historische Ausleihen ---
-    if "Ausleihen" in df_bestand.columns:
-        df_bestand["Anzahl_Ausleihen"] = df_bestand["Ausleihen"].replace("", np.nan)
-        df_bestand["Anzahl_Ausleihen"] = pd.to_numeric(
-            df_bestand["Anzahl_Ausleihen"], errors="coerce"
-        ).fillna(0)
-        df_bestand["Anzahl_Ausleihen"] = df_bestand["Anzahl_Ausleihen"].astype(int)
-    else:
-        # FALLBACK: Falls die Spalte fehlt - über ALLE Ausleihen zählen
-        # (bewusst ungefiltert, damit das Ergebnis unabhängig von den
-        # Sidebar-Filtern bleibt und im Cache wiederverwendet werden kann).
-        ausleihen_count = (
-            df_loans_all
-            .groupby("NR Zugang")
-            .size()
-            .reset_index(name="Anzahl_Ausleihen")
-        )
-        df_bestand = df_bestand.merge(ausleihen_count, on="NR Zugang", how="left")
-        df_bestand["Anzahl_Ausleihen"] = df_bestand["Anzahl_Ausleihen"].fillna(0).astype(int)
-
-    # --- Letzte Ausleihe ---
-    # WICHTIG: Wir nutzen das Feld "letzte Ausleihe" direkt aus dem Katalog
-    # (df_books), NICHT df_loans. df_loans enthält laut Bibliothek nur die
-    # Ausleihen der letzten ca. 2 Jahre - ein Medium, das z.B. vor 4 Jahren
-    # zuletzt ausgeliehen wurde, hätte dort gar keinen Eintrag mehr, obwohl
-    # es sehr wohl schon mal ausgeliehen wurde. Das Katalogfeld wird bei
-    # jeder Ausleihe aktualisiert und ist daher zuverlässiger.
-    if "letzte Ausleihe" in df_bestand.columns:
-        # Format ist laut Bibliothek fix "MM/DD/YYYY HH:MM:SS"
-        # (z.B. "01/05/2021 18:44:33") - kein Erraten per Stichprobe nötig.
-        df_bestand["Letzte_Ausleihe"] = robustes_datum(
-            df_bestand["letzte Ausleihe"], ["%m/%d/%Y %H:%M:%S"]
-        )
-    else:
-        df_bestand["Letzte_Ausleihe"] = pd.NaT
-
-    # --- Ausleihen der letzten 365 Tage ---
-    # Bewusst aus df_loans_all (ungefiltert), damit "letzte 365 Tage" immer
-    # ein fixes, aktuelles Zeitfenster ist - unabhängig von Filtern.
-    grenze_365 = pd.Timestamp.today() - pd.Timedelta(days=365)
-
-    ausleihen_365 = (
-        df_loans_all[df_loans_all["Ausleihdatum"] >= grenze_365]
-        .groupby("NR Zugang")
-        .size()
-        .reset_index(name="Ausleihen_365Tage")
-    )
-
-    df_bestand = df_bestand.merge(ausleihen_365, on="NR Zugang", how="left")
-    df_bestand["Ausleihen_365Tage"] = df_bestand["Ausleihen_365Tage"].fillna(0).astype(int)
-
-    # --- Umlauf ---
-    # TODO: Falls im Katalog eine echte Exemplar-Spalte existiert (z.B.
-    # "Anz_Exemplare"), hier verwenden statt fix 1 zu setzen:
-    # df_bestand["Bestand"] = df_bestand["Anz_Exemplare"]
-    df_bestand["Bestand"] = 1
-    df_bestand["Umlauf"] = df_bestand["Anzahl_Ausleihen"] / df_bestand["Bestand"]
-
-    # --- Alter ---
-    if "Datum der Aufnahme" in df_bestand.columns:
-        # Format ist laut Bibliothek fix "MM/DD/YYYY" (z.B. "04/10/2001") -
-        # kein Erraten per Stichprobe nötig, direkt der schnelle Pfad.
-        df_bestand["Aufnahme_DT"] = robustes_datum(
-            df_bestand["Datum der Aufnahme"], ["%m/%d/%Y"]
-        )
-    else:
-        df_bestand["Aufnahme_DT"] = pd.NaT
-
-    df_bestand["Alter_Jahre"] = (
-        (pd.Timestamp.today() - df_bestand["Aufnahme_DT"]).dt.days.div(365).round(1)
-    )
-
-    # --- Zusätzliche, altersfaire / aktuelle Umlaufkennzahlen ---
-    df_bestand["Ausleihen_pro_Jahr"] = np.where(
-        df_bestand["Alter_Jahre"] >= 0.5,
-        (df_bestand["Anzahl_Ausleihen"] / df_bestand["Alter_Jahre"]).round(2),
-        np.nan
-    )
-    df_bestand["Umlauf_365Tage"] = (
-        df_bestand["Ausleihen_365Tage"] / df_bestand["Bestand"]
-    ).round(2)
-
-    # --- Jahre seit letzter Ausleihe ---
-    # Für nie ausgeliehene Medien: Alter des Mediums selbst verwenden.
-    df_bestand["Jahre_seit_letzter_Ausleihe"] = (
-        (pd.Timestamp.today() - df_bestand["Letzte_Ausleihe"]).dt.days / 365
-    )
-    df_bestand["Jahre_seit_letzter_Ausleihe"] = df_bestand[
-        "Jahre_seit_letzter_Ausleihe"
-    ].fillna(df_bestand["Alter_Jahre"])
-
-    # --- Score-Komponente 1: Nutzungsintensität (max. 35) ---
-    rate_pro_jahr = pd.Series(
-        np.where(
-            df_bestand["Alter_Jahre"] >= 0.5,
-            df_bestand["Ausleihen_pro_Jahr"].fillna(0),
-            df_bestand["Umlauf_365Tage"]
-        ),
-        index=df_bestand.index
-    )
-    df_bestand["Score_Nutzung"] = (
-        35 * (1 - (rate_pro_jahr / 1.0)).clip(lower=0, upper=1)
-    ).round(1)
-
-    # --- Score-Komponente 2: Aktualität (max. 30) ---
-    df_bestand["Score_Aktualitaet"] = (
-        6 * df_bestand["Jahre_seit_letzter_Ausleihe"]
-    ).clip(lower=0, upper=30).round(1)
-
-    # --- Score-Komponente 3: Alter (max. 15) ---
-    df_bestand["Score_Alter"] = (
-        1.5 * df_bestand["Alter_Jahre"].fillna(0)
-    ).clip(lower=0, upper=15).round(1)
-
-    # --- Score-Komponente 4: Trend "abgestürzt" (max. 20) ---
-    rate_sicher = rate_pro_jahr.where(rate_pro_jahr > 0, np.nan)
-    verhaeltnis_aktuell = (df_bestand["Umlauf_365Tage"] / rate_sicher).clip(upper=1)
-    trend_rohwert = (20 * (1 - verhaeltnis_aktuell)).clip(lower=0, upper=20)
-    df_bestand["Score_Trend"] = np.where(
-        rate_pro_jahr >= 0.2, trend_rohwert.fillna(0), 0
-    ).round(1)
-
-    # --- Gesamtscore ---
-    df_bestand["Bereinigungsscore"] = (
-        df_bestand["Score_Nutzung"]
-        + df_bestand["Score_Aktualitaet"]
-        + df_bestand["Score_Alter"]
-        + df_bestand["Score_Trend"]
-    ).round(1)
-
-    # --- Nutzungsstatus ---
-    def status_bewertung(umlauf):
-        if umlauf == 0:
-            return "🔴 Ladenhüter"
-        elif umlauf < 0.2:
-            return "🟠 Kritisch"
-        elif umlauf < 1:
-            return "🟡 Beobachten"
-        else:
-            return "🟢 Aktiv"
-
-    df_bestand["Status"] = df_bestand["Umlauf"].apply(status_bewertung)
-
-    # --- Aufnahme-Monat/Jahr, deutsch formatiert ---
-    monats_map = {
-        "January": "Januar", "February": "Februar", "March": "März", "April": "April",
-        "May": "Mai", "June": "Juni", "July": "Juli", "August": "August",
-        "September": "September", "October": "Oktober", "November": "November",
-        "December": "Dezember"
-    }
-    monat_jahr = df_bestand["Aufnahme_DT"].dt.strftime("%B %Y")
-    df_bestand["Aufnahme_Monat_Jahr"] = monat_jahr.apply(
-        lambda x: monats_map.get(x.split()[0], x.split()[0]) + " " + x.split()[1]
-        if pd.notna(x) else ""
-    )
-    df_bestand.loc[df_bestand["Aufnahme_DT"].isna(), "Aufnahme_Monat_Jahr"] = ""
-
-    return df_bestand
-
-
-_t_scores = time.perf_counter()
-df_bestand_full = berechne_bestand_scores(df_books, df_loans)
-_dauer_scores = time.perf_counter() - _t_scores
-_log_zeit("berechne_bestand_scores()", _dauer_scores)
-if debug_zeiten:
-    st.sidebar.caption(
-        f"⏱️ Score-Berechnung: {_dauer_scores:.2f}s "
-        f"(sehr schnell = Cache-Treffer, mehrere Sekunden = tatsächliche Neuberechnung)"
-    )
+df_bestand_full = berechne_bestand_mit_reihen(df_books, df_loans)
 
 
 df_bestand = df_bestand_full.copy()
@@ -429,95 +154,101 @@ with st.sidebar:
 if st.session_state.pop("reset_bestand", False):
     st.session_state["bestand_schwelle_basis"] = "🔍 Aktuelle Filterung (lokal)"
     st.session_state["bestand_schwelle_pct"] = (80, 95)
-with st.expander("🎚️ Bereinigungs-Schwellenwerte anpassen", expanded=False):
+with col2:
+    with st.expander("🎚️ Bereinigungs-Schwellenwerte anpassen", expanded=False):
 
-    st.caption(
-        "Lege fest, ab welchem Anteil der schwächsten Medien (nach "
-        "Bereinigungsscore) eine Kategorie beginnt."
-    )
-
-    basis_wahl = st.radio(
-        "Basis für die Prozent-Berechnung",
-        options=["🔍 Aktuelle Filterung (lokal)", "🌐 Gesamter Bestand (global)"],
-        horizontal=True,
-        key="bestand_schwelle_basis",
-        help=(
-            "Lokal: Prozent beziehen sich nur auf den aktuell gefilterten "
-            "Standort/Medienart/Lesealter. Global: Prozent beziehen sich "
-            "immer auf den kompletten, ungefilterten Bestand - praktisch, "
-            "wenn die Schwellenwerte über verschiedene Filteransichten "
-            "hinweg vergleichbar bleiben sollen."
+        st.caption(
+            "Lege fest, ab welchem Anteil der schwächsten Medien (nach "
+            "Bereinigungsscore) eine Kategorie beginnt."
         )
-    )
 
-    basis_df = df_bestand if basis_wahl.startswith("🔍") else df_bestand_full
+        basis_wahl = st.radio(
+            "Basis für die Prozent-Berechnung",
+            options=["🔍 Aktuelle Filterung (lokal)", "🌐 Gesamter Bestand (global)"],
+            horizontal=True,
+            key="bestand_schwelle_basis",
+            help=(
+                "Lokal: Prozent beziehen sich nur auf den aktuell gefilterten "
+                "Standort/Medienart/Lesealter. Global: Prozent beziehen sich "
+                "immer auf den kompletten, ungefilterten Bestand - praktisch, "
+                "wenn die Schwellenwerte über verschiedene Filteransichten "
+                "hinweg vergleichbar bleiben sollen."
+            )
+        )
 
-    # Zeigt an, welche Filterwerte konkret in die gewählte Basis einfliessen -
-    # gerade bei "lokal" sonst nicht auf den ersten Blick ersichtlich.
-    aktive_filter_texte = []
-    for conf in extra_filters_config:
-        spalte = conf["col"]
-        werte = st.session_state.get(f"bestand_extra_{spalte}", [])
-        if werte:
-            aktive_filter_texte.append(f"{conf['label']}: {', '.join(map(str, werte))}")
+        basis_df = df_bestand if basis_wahl.startswith("🔍") else df_bestand_full
 
-    if basis_wahl.startswith("🔍"):
-        if aktive_filter_texte:
-            st.caption("📌 Verwendete Filterwerte: " + " · ".join(aktive_filter_texte))
+        # Zeigt an, welche Filterwerte konkret in die gewählte Basis einfliessen -
+        # gerade bei "lokal" sonst nicht auf den ersten Blick ersichtlich.
+        aktive_filter_texte = []
+        for conf in extra_filters_config:
+            spalte = conf["col"]
+            werte = st.session_state.get(f"bestand_extra_{spalte}", [])
+            if werte:
+                aktive_filter_texte.append(f"{conf['label']}: {', '.join(map(str, werte))}")
+
+        if basis_wahl.startswith("🔍"):
+            if aktive_filter_texte:
+                st.caption("📌 Verwendete Filterwerte: " + " · ".join(aktive_filter_texte))
+            else:
+                st.caption("📌 Aktuell ist kein Filter gesetzt - 'lokal' entspricht daher dem gesamten Bestand.")
         else:
-            st.caption("📌 Aktuell ist kein Filter gesetzt - 'lokal' entspricht daher dem gesamten Bestand.")
-    else:
-        st.caption("📌 Basis ist der gesamte Bestand, unabhängig von den Sidebar-Filtern.")
+            st.caption("📌 Basis ist der gesamte Bestand, unabhängig von den Sidebar-Filtern.")
 
-    if st.button(
-        "🔄 Auf Standardwerte zurücksetzen",
-        help="Setzt den Regler auf 80 % / 95 % zurück."
-    ):
-        st.session_state["reset_bestand"] = True
-        st.rerun()
+        if st.button(
+            "🔄 Auf Standardwerte zurücksetzen",
+            help="Setzt den Regler auf 80 % / 95 % zurück."
+        ):
+            st.session_state["reset_bestand"] = True
+            st.rerun()
 
-    # Eine einzelne Skala mit zwei Reglerpunkten statt zwei getrennter
-    # Slider - st.slider gibt bei einem Tupel als value automatisch einen
-    # Bereichs-Slider mit zwei Griffen zurück.
-    pct_gruen, pct_rot = st.slider(
-        "🟢 behalten → 🟡 prüfen → 🔴 Bereinigung prüfen",
-        min_value=0, max_value=100, value=(80, 95), step=1,
-        format="%d%%",
-        key="bestand_schwelle_pct",
-        help=(
-            "Linker Punkt: Grenze 🟢→🟡. Rechter Punkt: Grenze 🟡→🔴. "
-            "Beide als Anteil der schwächsten Medien (nach Bereinigungsscore)."
+        # Eine einzelne Skala mit zwei Reglerpunkten statt zwei getrennter
+        # Slider - st.slider gibt bei einem Tupel als value automatisch einen
+        # Bereichs-Slider mit zwei Griffen zurück.
+        pct_gruen, pct_rot = st.slider(
+            "🟢 behalten → 🟡 prüfen → 🔴 Bereinigung prüfen",
+            min_value=0, max_value=100, value=(80, 95), step=1,
+            format="%d%%",
+            key="bestand_schwelle_pct",
+            help=(
+                "Linker Punkt: Grenze 🟢→🟡. Rechter Punkt: Grenze 🟡→🔴. "
+                "Beide als Anteil der schwächsten Medien (nach Bereinigungsscore)."
+            )
         )
-    )
 
-    if not basis_df.empty:
-        schwelle_gruen = float(basis_df["Bereinigungsscore"].quantile(pct_gruen / 100))
-        schwelle_rot = float(basis_df["Bereinigungsscore"].quantile(pct_rot / 100))
-    else:
-        schwelle_gruen, schwelle_rot = 0.0, 0.0
+        if not basis_df.empty:
+            schwelle_gruen = float(basis_df["Bereinigungsscore"].quantile(pct_gruen / 100))
+            schwelle_rot = float(basis_df["Bereinigungsscore"].quantile(pct_rot / 100))
+        else:
+            schwelle_gruen, schwelle_rot = 0.0, 0.0
 
-    # Mindestabstand, damit pd.cut keine doppelten Bin-Grenzen bekommt
-    schwelle_rot_sicher = max(schwelle_rot, schwelle_gruen + 0.1)
+        # Mindestabstand, damit pd.cut keine doppelten Bin-Grenzen bekommt
+        schwelle_rot_sicher = max(schwelle_rot, schwelle_gruen + 0.1)
 
-    st.caption(
-        f"Entspricht Score {schwelle_gruen:.1f} bzw. {schwelle_rot:.1f} "
-        f"(Basis: {basis_wahl.split(' ', 1)[1]})."
-    )
-
-    # --- Live-Vorschau: wie viele Medien landen in welcher Kategorie? ---
-    if not df_bestand.empty:
-        n_gruen = (df_bestand["Bereinigungsscore"] <= schwelle_gruen).sum()
-        n_gelb = (
-            (df_bestand["Bereinigungsscore"] > schwelle_gruen)
-            & (df_bestand["Bereinigungsscore"] <= schwelle_rot_sicher)
-        ).sum()
-        n_rot = (df_bestand["Bereinigungsscore"] > schwelle_rot_sicher).sum()
-
-        st.markdown(
-            f"**Vorschau (aktuelle Filterung):** "
-            f"🟢 {n_gruen:,} behalten · 🟡 {n_gelb:,} prüfen · "
-            f"🔴 {n_rot:,} Bereinigung prüfen"
+        st.caption(
+            f"Entspricht Score {schwelle_gruen:.1f} bzw. {schwelle_rot:.1f} "
+            f"(Basis: {basis_wahl.split(' ', 1)[1]})."
         )
+        st.info(
+            f"Reihenschwellen: "
+            f"gut ≤ {basis_df["Bereinigungsscore"].quantile(0.33)}, \n"
+            f"wenig genutzt ≥ {basis_df["Bereinigungsscore"].quantile(0.66)}, "
+            f"Abweichung ±{0.5 * basis_df["Bereinigungsscore"].std()}"
+        )
+        # --- Live-Vorschau: wie viele Medien landen in welcher Kategorie? ---
+        if not df_bestand.empty:
+            n_gruen = (df_bestand["Bereinigungsscore"] <= schwelle_gruen).sum()
+            n_gelb = (
+                (df_bestand["Bereinigungsscore"] > schwelle_gruen)
+                & (df_bestand["Bereinigungsscore"] <= schwelle_rot_sicher)
+            ).sum()
+            n_rot = (df_bestand["Bereinigungsscore"] > schwelle_rot_sicher).sum()
+
+            st.markdown(
+                f"**Vorschau (aktuelle Filterung):** "
+                f"🟢 {n_gruen:,} behalten · 🟡 {n_gelb:,} prüfen · "
+                f"🔴 {n_rot:,} Bereinigung prüfen"
+            )
 
 
 df_bestand["Bereinigung"] = pd.cut(
@@ -540,32 +271,48 @@ pruefen = (df_bestand["Bereinigung"] == "🟡 prüfen").sum()
 bereinigung = (df_bestand["Bereinigung"] == "🔴 Bereinigung prüfen").sum()
 score_mean = df_bestand["Bereinigungsscore"].mean()
 
-c1.metric("📚 Bestand", f"{len(df_bestand):,}")
-c2.metric("🟢 behalten", f"{behalten:,}")
-c3.metric("🟡 prüfen", f"{pruefen:,}")
-c4.metric("🔴 Bereinigung", f"{bereinigung:,}")
-c5.metric("⭐ Ø Score", f"{score_mean:.1f}")
-
-
+with c1:
+    kpi_box("📚 Bestand", f"{len(df_bestand):,}")
+with c2:
+    kpi_box("🟢 behalten", f"{behalten:,}")
+with c3:
+    kpi_box("🟡 prüfen", f"{pruefen:,}")
+with c4:
+    kpi_box("🔴 Bereinigung", f"{bereinigung:,}")
+with c5:
+    kpi_box("⭐ Ø Score", f"{score_mean:.1f}")
+st.divider()
 # =====================================================
 # PORTFOLIO-ANALYSE: ALTER VS. NUTZUNG
 # =====================================================
 
-st.subheader("📈 Bestandsportfolio: Alter vs. Nutzung")
+farben = {
+    "🟢 behalten": "#2ca02c",
+    "🟡 prüfen": "#f1c40f",
+    "🔴 Bereinigung prüfen": "#e74c3c",
+}
+col1, col2 = st.columns([3,2])
+with col1: 
+    st.subheader("📈 Bestandsportfolio: Alter vs. Nutzung")
 
 scatter_data = df_bestand.copy()
 scatter_data = scatter_data[scatter_data["Alter_Jahre"].notna()]
 scatter_data = scatter_data[scatter_data["Umlauf"].notna()]
 
 # Nur die für Chart/Detailkarte benötigten Spalten mitgeben.
-# df_bestand schleppt sonst alle ~100 Original-Katalogspalten mit (u.a.
-# "Band" mit gemischten Typen int/"" ), was beim Serialisieren fürs Chart
+# df_bestand schleppt sonst alle ~100 Original-Katalogspalten mit , was beim Serialisieren fürs Chart
 # zu einem ArrowInvalid-Fehler führt.
 benoetigte_spalten = [
     "NR Zugang",
     "Titel",
     "Verfasser I(1)",
     "Kategorie Alter",
+    "Reihe(1)",
+    "Band",
+    "Reihen_Anzahl_Baende",
+    "Reihen_Median_Score",
+    "Reihen_Luecken",
+    "Reihen_Hinweis",
     "Aufnahme_Monat_Jahr",
     "Standort(1)",
     "Medienart",
@@ -588,7 +335,6 @@ benoetigte_spalten = [
 benoetigte_spalten = [c for c in benoetigte_spalten if c in scatter_data.columns]
 scatter_data = scatter_data[benoetigte_spalten].copy()
 
-
 if not scatter_data.empty:
 
     # Domain für die Legende IMMER aus den echten Kategorie-Werten ableiten,
@@ -598,16 +344,18 @@ if not scatter_data.empty:
         if k in scatter_data["Bereinigung"].unique().tolist()
     ] or df_bestand["Bereinigung"].cat.categories.tolist()
 
-    farben = {
-        "🟢 behalten": "#2ca02c",
-        "🟡 prüfen": "#f1c40f",
-        "🔴 Bereinigung prüfen": "#e74c3c",
-    }
+
     range_farben = [farben[k] for k in kategorien]
 
-    st.caption("Medien rechts unten sind alt und wenig genutzt → mögliche Bereinigungskandidaten. ")
-    st.caption("👉 Klicke auf einen Punkt, um Details inkl. Cover zu sehen.")
-
+    with col2:
+        sichtbare_kategorien = st.multiselect(
+            "Bereinigungskategorien anzeigen",
+            options=kategorien,
+            default =kategorien
+        )
+    scatter_data = scatter_data[
+        scatter_data['Bereinigung'].isin(sichtbare_kategorien)
+    ]
     # Fester Seed für reproduzierbaren Jitter (Punkte springen beim Zoomen nicht)
     np.random.seed(42)
     scatter_data["Alter_Jahre_Jitter"] = (
@@ -623,7 +371,14 @@ if not scatter_data.empty:
         on="click",
         empty=False,
     )
-
+    scatter_data['Reihe_Band'] = scatter_data.apply(
+        lambda r: (
+            f"{r['Reihe(1)']} (Band {r['Band']})"
+            if pd.notna(r["Reihe(1)"]) and str(r["Reihe(1)"]).strip() != ""
+            else None
+        ),
+        axis=1
+    )
     scatter = (
         alt.Chart(scatter_data)
         .mark_circle(opacity=0.7, stroke="white", strokeWidth=0.5)
@@ -646,18 +401,21 @@ if not scatter_data.empty:
             ),
             tooltip=[
                 "Titel",
-                "Standort(1)",
+                alt.Tooltip("Verfasser I(1):N", title="Autor"),
+                alt.Tooltip("Reihe_Band:N", title="Reihe"),
+                alt.Tooltip("Standort(1):N", title="Standort"),
                 "Medienart",
                 "Kategorie Alter",
                 "Aufnahme_Monat_Jahr",
                 alt.Tooltip("Alter_Jahre:Q", title="Alter (exakt)", format=".1f"),
                 alt.Tooltip("Anzahl_Ausleihen:Q", title="Ausleihen gesamt", format=".0f"),
                 alt.Tooltip("Ausleihen_365Tage:Q", title="Ausleihen (letzte 365 Tage)", format=".0f"),
-                "Bereinigungsscore"
+                "Bereinigungsscore",
+                "Reihen_Hinweis"
             ]
         )
         .add_params(punkt_klick)
-        .properties(height=500)
+        .properties(height=350)
         .interactive()
     )
 
@@ -677,122 +435,127 @@ if not scatter_data.empty:
             selektierte_nr = punkte[0].get("NR Zugang")
 
     if selektierte_nr is not None:
-        treffer = scatter_data[scatter_data["NR Zugang"] == selektierte_nr]
-
+        treffer = scatter_data[
+            scatter_data["NR Zugang"]==selektierte_nr
+        ]
         if not treffer.empty:
-            buch = treffer.iloc[0]
-            bewertung = buch.get("Bereinigung", None)
-            badge_farbe = farben.get(bewertung, "#888888")
-
-            letzte_ausleihe_dt = buch.get("Letzte_Ausleihe", pd.NaT)
-            if pd.notna(letzte_ausleihe_dt):
-                letzte_ausleihe_text = pd.Timestamp(letzte_ausleihe_dt).strftime("%d.%m.%Y")
-            else:
-                letzte_ausleihe_text = "unbekannt"
-
-            st.divider()
-
-            with st.container(border=True):
-
-                col_bild, col_info = st.columns([1, 2.6], gap="medium")
-
-                with col_bild:
-                    cover_url = buch.get("URL_Cover", "")
-                    if cover_url and str(cover_url).strip():
-                        st.image(str(cover_url), width=170)
-                    else:
-                        st.markdown(
-                            "<div style='width:170px;height:230px;"
-                            "background:#f0f0f0;border-radius:8px;"
-                            "display:flex;align-items:center;justify-content:center;"
-                            "color:#999;font-size:0.85em;text-align:center;'>"
-                            "📕<br>Kein Cover</div>",
-                            unsafe_allow_html=True
-                        )
-
-                with col_info:
-                    st.markdown(f"#### {buch.get('Titel', '-')}")
-                    autor = buch.get("Verfasser I(1)", "")
-                    if autor and str(autor).strip():
-                        st.markdown(f"<span style='color:#666;'>{autor}</span>", unsafe_allow_html=True)
-
-                    st.markdown(
-                        f"<span style='background-color:{badge_farbe}22; "
-                        f"color:{badge_farbe}; padding:4px 12px; border-radius:14px; "
-                        f"font-size:0.85em; font-weight:600;'>{bewertung}</span>"
-                        f"&nbsp;&nbsp;"
-                        f"<span style='color:#888; font-size:0.85em;'>"
-                        f"📍 {buch.get('Standort(1)', '-')} &nbsp;·&nbsp; "
-                        f"📚 {buch.get('Medienart', '-')} &nbsp; &nbsp; "
-                        f"📅 {buch.get('Aufnahme_Monat_Jahr', '-')} &nbsp; &nbsp; "
-                        f"👶 {buch.get('Kategorie Alter', '-')}"
-                        f"</span>",
-                        unsafe_allow_html=True
-                    )
-
-                    st.write("")
-
-                    m1, m2, m3, m4 = st.columns(4)
-                    m1.metric("Alter", f"{buch.get('Alter_Jahre', '-')} J.")
-                    m2.metric("Ausleihen gesamt", f"{buch.get('Anzahl_Ausleihen', '-')}")
-                    m3.metric("Letzte 365 Tage", f"{buch.get('Ausleihen_365Tage', '-')}")
-                    m4.metric("Score", f"{buch.get('Bereinigungsscore', '-')}")
-
-                    st.caption(f"🕓 Letzte Ausleihe: {letzte_ausleihe_text}")
-
-                    st.markdown(
-                        f"<span style='color:#888; font-size:0.8em;'>"
-                        f"Score-Zusammensetzung: "
-                        f"Nutzung {buch.get('Score_Nutzung', '-')} · "
-                        f"Aktualität {buch.get('Score_Aktualitaet', '-')} · "
-                        f"Alter {buch.get('Score_Alter', '-')} · "
-                        f"Trend {buch.get('Score_Trend', '-')}"
-                        f"</span>",
-                        unsafe_allow_html=True
-                    )
-    else:
-        st.caption("👉 Klicke auf einen Punkt im Diagramm, um Details anzuzeigen.")
+            st.session_state.selected_medium = treffer.iloc[0]
+            st.session_state.selection_source = "scatter"
 
 else:
     st.info("Keine ausreichenden Daten für Portfolioanalyse vorhanden.")
+
+detail_placeholder = st.empty()  
 
 
 # =====================================================
 # TABELLE: NUR AUF ABFRUF (EXPANDER UNTEN)
 # =====================================================
-with st.expander("📋 Liste: Top 50 Bereinigungskandidaten (vollständige Tabelle)"):
+with st.expander("📋 Liste: Bereinigungskandidaten"):
+    
+    col1, col2, col3, col4 =st.columns([6,4,1,1])
+    with col1:
+        st.caption(
+            "Hier finden Sie die Medien mit dem höchsten Bereinigungspotenzial sortiert nach Score."
+            "Für Details klicken Sie bitte auf den Punkt im Diagramm."
+        )
 
-    st.caption(
-        "Hier finden Sie die 50 Medien mit dem höchsten Bereinigungspotenzial "
-        "sortiert nach Score. Für Details klicken Sie bitte auf den Punkt im Diagramm."
-    )
+    score = df_bestand.sort_values("Bereinigungsscore", ascending=False)
+    
+    with col2:
+        suche = st.text_input("🔍 Medium suchen", key='bestand_suche')
 
-    score = df_bestand.sort_values("Bereinigungsscore", ascending=False).head(50)
+        if suche:
+            if suche.isdigit():
+                score=df_bestand_full[
+                    df_bestand_full['NR Zugang'].astype(str)==suche
+                ]
+            else:
+                maske = (
+                    score["Titel"].astype(str).str.contains(suche, case=False, na=False)
+                    |
+                    score["Verfasser I(1)"].astype(str).str.contains(suche, case=False, na=False)
+                    |
+                    score["Medienart"].astype(str).str.contains(suche, case=False, na=False)
+                    |
+                    score["Signatur Klartext"].astype(str).str.contains(suche, case=False, na=False)
+                    |
+                    score['Reihe(1)'].astype(str).str.contains(suche, case=False, na=False)
+                )
+
+                score = score[maske]
+
+
+    with col3:
+        page_size = st.selectbox(
+            "Zeilen pro Seite",
+            [25,50,100,250],
+            index=1
+        )
+    with col4:
+        pages = max(1, (len(score)-1) // page_size + 1)
+
+        page = st.number_input(
+            "Seite",
+            min_value=1,
+            max_value=pages,
+            value=1
+        )
+
+    start = (page-1)*page_size
+    ende = start + page_size
 
     spalten = [
         "Medienart",
         "Signatur(1)",
+        "NR Zugang",
         "Titel",
         "Verfasser I(1)",
         "Kategorie Alter",
+        "Reihe(1)",
+        "Band",
         "Aufnahme_Monat_Jahr",
+        "Alter_Jahre",
         "Standort(1)",
         "Anzahl_Ausleihen",
         "Ausleihen_pro_Jahr",
         "Ausleihen_365Tage",
-        "Umlauf",
-        "Umlauf_365Tage",
-        "Alter_Jahre",
+        "Bereinigungsscore",
+        "Bereinigung",
+        "Reihen_Hinweis",
+        #"Umlauf",
+        #"Umlauf_365Tage",
         "Score_Nutzung",
         "Score_Aktualitaet",
         "Score_Alter",
-        "Score_Trend",
-        "Bereinigungsscore",
-        "Bereinigung"
+        "Score_Trend"
+
     ]
     spalten = [c for c in spalten if c in score.columns]
+    page_df = score.iloc[start:ende]
+    event=st.dataframe(
+        page_df[spalten], 
+        key =f"bereinigung_{st.session_state.table_key}",
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row")
+    if event.selection.rows:
+        index = start + event.selection.rows[0]
+        st.session_state.selected_medium = score.iloc[index]
 
-    st.dataframe(score[spalten], hide_index=True, use_container_width=True)
+        st.session_state.table_key +=1
+
+    
+    st.caption(f"Zeige {start+1}-{min(ende,len(score))} von {len(score)} Datensätzen")
+
+with detail_placeholder.container():
+    if st.session_state.get("selected_medium") is not None:
+        show_media_detail(st.session_state["selected_medium"], farben)
+    else:
+        st.info('👉 Klicken Sie auf einen Punkt im Diagramm oder wählen Sie ein Medium in der Tabelle aus, um die Detailansicht zu öffnen.')
+
+
 
 with st.expander("ℹ️ Bewertungslogik der Bestandsanalyse"):
 
@@ -852,9 +615,3 @@ Dadurch werden sowohl ältere als auch neuere Medien möglichst fair bewertet. E
 
 Die einzelnen Teil-Scores (**Nutzung**, **Aktualität**, **Alter** und **Trend**) werden in der Detailansicht eines Mediums sowie in der Tabelle angezeigt. Dadurch lässt sich jederzeit nachvollziehen, warum ein Medium einen bestimmten Bereinigungsscore erhalten hat.
 """)
-
-if debug_zeiten:
-    st.sidebar.caption(f"⏱️ Gesamte Skriptlaufzeit: {time.perf_counter() - _start_zeit:.2f}s")
-    with st.sidebar.expander("⏱️ Messverlauf dieser Session"):
-        for eintrag in st.session_state.get("bestand_ladezeiten_verlauf", []):
-            st.caption(eintrag)

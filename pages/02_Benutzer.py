@@ -8,8 +8,8 @@ import numpy as np
 
 warnings.filterwarnings('ignore')
 
-from utils import load_data, load_swiss_locations, validate_and_clean_locations, run_validation_pipeline, load_shapefile_cached
-from filters import get_sidebar_filters
+from src.utils import load_data, load_swiss_locations, validate_and_clean_locations, run_validation_pipeline, load_shapefile_cached
+from src.filters import get_sidebar_filters
 
 st.set_page_config(page_title="Benutzer Analyse", page_icon="👥", layout="wide")
 st.title("👥 Benutzer- und Zielgruppenanalyse")

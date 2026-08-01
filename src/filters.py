@@ -433,6 +433,11 @@ def get_sidebar_filters(
     # Sicherstellen, dass period_mode im Return ist, auch wenn has_extra False (unwahrscheinlich)
     p_mode = st.session_state.get(mode_key, "Gesamte Daten") if has_extra else "Gesamte Daten"
 
+    extra_filters = {}
+    if extra_filters_config:
+        for col in extra_filter_keys:
+            extra_filters[col] = st.session_state.get(f"{prefix}_extra_{col}", [])
+
     return df_res, df_extra_res, {
         "groups": sel_grp, 
         "gender": sel_gen, 
@@ -441,9 +446,172 @@ def get_sidebar_filters(
         "ss_filter": sel_ss,
         "date_range": date_range_val, # Immer zurückgeben (kann None sein wenn kein extra)
         "first_loan_only": st.session_state.get(f"{prefix}_first_loan", False) if has_extra else False,
-        "period_mode": p_mode,
+        #"period_mode": p_mode,
         "group_col": group_col,
         "gender_col": "Geschlecht_Filter",
         "age_col": "Alter_Berechnet",
-        "location_col": loc_col
+        "location_col": loc_col,
+        "extra_filters": extra_filters,
+    }
+
+def apply_filters(df, date_range, selected_zweigstellen, selected_medienarten, selected_benutzergruppen, selected_kategorie_alter, nur_erstausleihen=False):
+    """
+    Filtert den DataFrame.
+    nur_erstausleihen: Wenn True, werden alle Zeilen entfernt, wo Verlängerung_Anz > 0 ist.
+    """
+    if df is None or df.empty:
+        return df
+        
+    filtered = df.copy()
+    
+    # --- NEU: Filter für Verlängerungen ---
+    if nur_erstausleihen:
+        if "Verlängerung_Anz" in filtered.columns:
+            filtered = filtered[filtered["Verlängerung_Anz"] == 0]
+        else:
+            st.warning("Feld 'Verlängerung_Anz' nicht gefunden. Filter kann nicht angewendet werden.")
+    # --------------------------------------
+
+    # Datumsfilter
+    if date_range and len(date_range) == 2 and "Ausleihdatum" in filtered.columns:
+        start_date = pd.to_datetime(date_range[0])
+        end_date = pd.to_datetime(date_range[1])
+        filtered = filtered[
+            (filtered["Ausleihdatum"] >= start_date)
+            & (filtered["Ausleihdatum"] <= end_date)
+        ]
+
+    # Zweigstelle
+    if selected_zweigstellen and "Zweigstelle" in filtered.columns:
+        filtered = filtered[filtered["Zweigstelle"].astype(str).isin(selected_zweigstellen)]
+        
+    # Medienart
+    if selected_medienarten and "Medienart" in filtered.columns:
+        filtered = filtered[filtered["Medienart"].astype(str).isin(selected_medienarten)]
+        
+    # --- BENUTZERGRUPPE: Dynamische Spaltenwahl ---
+    if selected_benutzergruppen:
+        # Prüfen, ob die gruppierte Spalte existiert (nach apply_group_mapping)
+        if "Benutzergruppe_Gruppiert" in filtered.columns:
+            target_col = "Benutzergruppe_Gruppiert"
+        else:
+            # Fallback auf die Originalspalte, falls Mapping nicht lief
+            target_col = "Benutzergruppe"
+            
+        if target_col in filtered.columns:
+            filtered = filtered[filtered[target_col].astype(str).isin(selected_benutzergruppen)]
+        else:
+            st.warning(f"Spalte {target_col} nicht gefunden.")
+    # -------------------------------------------
+
+    # Kategorie Alter
+    if selected_kategorie_alter and "Kategorie Alter" in filtered.columns:
+        filtered = filtered[filtered["Kategorie Alter"].astype(str).isin(selected_kategorie_alter)]
+        
+    return filtered
+
+def get_filter_settings(
+    date_range,
+    sel_zweig,
+    sel_medien,
+    sel_gruppe,
+    sel_alter,
+    nur_erstausleihen
+):
+    """
+    Erstellt ein zentrales Filterobjekt.
+    """
+    return {
+        "date_range": date_range,
+        "zweigstelle": sel_zweig,
+        "medienart": sel_medien,
+        "benutzergruppe": sel_gruppe,
+        "alter": sel_alter,
+        "erstausleihen": nur_erstausleihen
+    }
+
+def build_filtered_data(data, filtered_users, filtered_loans, filter_state):
+    # Baut alle benötigten Dataframes auf Basis der bereits gefilterten Daten
+    df_users_all = data["users"].copy()
+    df_books_all = data["catalog"].copy()
+    df_smart = data['smartlibrary'].copy()
+
+    df_loans = filtered_loans.copy()
+    df_users = filtered_users.copy()
+
+    # Ausgeliehene Medien
+    aktive_medien = (
+        df_loans["NR Zugang"]
+        .dropna()
+        .unique()
+    )
+    df_books_used = df_books_all[
+        df_books_all["NR Zugang"]
+        .astype(str)
+        .isin(aktive_medien)
+        ]
+
+    #----------------------------------
+    # Ausleihen OHNE Datumsfilter
+    #----------------------------------
+
+    df_loans_no_date =data['loans'].copy()
+
+
+    # Nur Benutzer übernehmen,
+    # welche durch die Benutzerfilter übrig bleiben
+
+    aktive_benutzer = (
+        filtered_users["Nummer"]
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+
+    df_loans_no_date["Ausleihperson"] = (
+        df_loans_no_date["Ausleihperson"]
+        .astype(str)
+    )
+
+    df_loans_no_date = df_loans_no_date[
+        df_loans_no_date["Ausleihperson"]
+        .isin(aktive_benutzer)
+    ]
+    extras = filter_state.get("extra_filters", {})
+    if extras.get("Zweigstelle"):
+
+        df_loans_no_date = df_loans_no_date[
+            df_loans_no_date["Zweigstelle"]
+            .astype(str)
+            .isin(extras["Zweigstelle"])
+        ]
+    if extras.get("Medienart"):
+
+        df_loans_no_date = df_loans_no_date[
+            df_loans_no_date["Medienart"]
+            .astype(str)
+            .isin(extras["Medienart"])
+        ]
+    if extras.get("Kategorie Alter"):
+
+        df_loans_no_date = df_loans_no_date[
+            df_loans_no_date["Kategorie Alter"]
+            .astype(str)
+            .isin(extras["Kategorie Alter"])
+        ]
+    if filter_state.get("first_loan_only", False):
+
+        if "Erstausleihe" in df_loans_no_date.columns:
+
+            df_loans_no_date = df_loans_no_date[
+                df_loans_no_date["Erstausleihe"]
+            ]
+    return {
+        "loans": df_loans,
+        "loans_no_date": df_loans_no_date,# ohne Datumsfilter
+        "users": df_users, # passend zu loans
+        "users_all": df_users_all , #kompletter Benutzerbestand
+        "books": df_books_all,
+        "books_used": df_books_used, #nur ausgeliehene Medien
+        "smart": df_smart
     }

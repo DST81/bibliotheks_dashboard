@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from utils import load_data, apply_filters
+from src.utils import load_data
+from src.filters import apply_filters
 
 st.set_page_config(page_title="Medien Analyse", page_icon="📚", layout="wide")
 st.title("Medienbestand und Top-Listen")

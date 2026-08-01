@@ -241,7 +241,12 @@ def load_data():
         id_col = "NR Zugang"
         if id_col in df_loans.columns:
             df_loans[id_col] = df_loans[id_col].astype(str).str.strip()
-            result["loans"] = df_loans.merge(df_catalog, on=id_col, how="left")
+            result["loans"] = df_loans.merge(
+                df_catalog, 
+                on=id_col, 
+                how="left",
+                suffixes=("_loan", "_catalog"))
+            
 
     return result
 
@@ -279,61 +284,7 @@ def apply_config(df, config):
 
     return df_work
 
-def apply_filters(df, date_range, selected_zweigstellen, selected_medienarten, selected_benutzergruppen, selected_kategorie_alter, nur_erstausleihen=False):
-    """
-    Filtert den DataFrame.
-    nur_erstausleihen: Wenn True, werden alle Zeilen entfernt, wo Verlängerung_Anz > 0 ist.
-    """
-    if df is None or df.empty:
-        return df
-        
-    filtered = df.copy()
-    
-    # --- NEU: Filter für Verlängerungen ---
-    if nur_erstausleihen:
-        if "Verlängerung_Anz" in filtered.columns:
-            filtered = filtered[filtered["Verlängerung_Anz"] == 0]
-        else:
-            st.warning("Feld 'Verlängerung_Anz' nicht gefunden. Filter kann nicht angewendet werden.")
-    # --------------------------------------
 
-    # Datumsfilter
-    if date_range and len(date_range) == 2 and "Ausleihdatum" in filtered.columns:
-        start_date = pd.to_datetime(date_range[0])
-        end_date = pd.to_datetime(date_range[1])
-        filtered = filtered[
-            (filtered["Ausleihdatum"] >= start_date)
-            & (filtered["Ausleihdatum"] <= end_date)
-        ]
-
-    # Zweigstelle
-    if selected_zweigstellen and "Zweigstelle" in filtered.columns:
-        filtered = filtered[filtered["Zweigstelle"].astype(str).isin(selected_zweigstellen)]
-        
-    # Medienart
-    if selected_medienarten and "Medienart" in filtered.columns:
-        filtered = filtered[filtered["Medienart"].astype(str).isin(selected_medienarten)]
-        
-    # --- BENUTZERGRUPPE: Dynamische Spaltenwahl ---
-    if selected_benutzergruppen:
-        # Prüfen, ob die gruppierte Spalte existiert (nach apply_group_mapping)
-        if "Benutzergruppe_Gruppiert" in filtered.columns:
-            target_col = "Benutzergruppe_Gruppiert"
-        else:
-            # Fallback auf die Originalspalte, falls Mapping nicht lief
-            target_col = "Benutzergruppe"
-            
-        if target_col in filtered.columns:
-            filtered = filtered[filtered[target_col].astype(str).isin(selected_benutzergruppen)]
-        else:
-            st.warning(f"Spalte {target_col} nicht gefunden.")
-    # -------------------------------------------
-
-    # Kategorie Alter
-    if selected_kategorie_alter and "Kategorie Alter" in filtered.columns:
-        filtered = filtered[filtered["Kategorie Alter"].astype(str).isin(selected_kategorie_alter)]
-        
-    return filtered
 
 
 
@@ -582,3 +533,4 @@ def run_validation_pipeline(users_df, ref_df):
 def load_shapefile_cached(shp_path):
     """Lädt das Shapefile und cached es im Speicher."""
     return gpd.read_file(shp_path)
+
