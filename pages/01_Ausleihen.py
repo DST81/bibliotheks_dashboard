@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime
-from src.filters import get_sidebar_filters
+from src.filters import get_sidebar_filters, build_filtered_data
+from components.ui import kpi_box
 import altair as alt
 import numpy as np
 
@@ -33,7 +34,7 @@ if st.sidebar.checkbox("Debug State anzeigen", value=False):
 # 1. DATEN LADEN
 # ==============================================================================
 if 'data' not in st.session_state or st.session_state['data'] is None:
-    st.error("Keine Daten geladen. Bitte starten Sie das Dashboard über die [Startseite](../app.py).")
+    st.error("Keine Daten geladen. Bitte starten Sie das Dashboard über die Startseite.")
     st.stop()
 
 data = st.session_state['data']
@@ -52,9 +53,16 @@ if df_loans is None or df_loans.empty:
 # 2. FILTER INITIALISIEREN
 # ==============================================================================
 extra_filters_config = [
-    {"label": "🏢 Zweigstelle", "col": "Zweigstelle"},
-    {"label": "📚 Medienart", "col": "Medienart"},
-    {"label": "📍 Standort", "col": "Standort(1)"}
+    {"label": "🏢 Zweigstelle", "col": "Zweigstelle_loan"},
+]
+
+catalog_filters_config = [
+    {"label": "📍 Standort", "col": "Standort(1)", "type": "multiselect", "default": []},
+    {"label": "📚 Medienart", "col": "Medienart", "type": "multiselect", "default": []},
+    {"label": "🎯 Lesealter", "col": "Kategorie Alter", "type": "multiselect", "default": []},
+    {"label": "🏷️ Themenbereich", "col": "Themenbereich", "type": "multiselect", "default": []},
+    {"label": "🔖 Signatur", "col": "Signatur Klartext", "type": "multiselect", "default": []},
+    {"label": "🔖 Signaturgruppe", "col": "Signatur(1)", "type": "multiselect", "default": []},
 ]
 
 df_users_filtered, df_loans_filtered, filter_info = get_sidebar_filters(
@@ -64,9 +72,28 @@ df_users_filtered, df_loans_filtered, filter_info = get_sidebar_filters(
     enable_date_filter=True,
     date_col_name="Ausleihdatum",
     extra_filters_config=extra_filters_config,
+    df_catalog=df_books,
+    catalog_filters_config=catalog_filters_config,
     enable_first_loan_toggle=True,
-    first_loan_col_name="Erstausleihe"
+    first_loan_col_name="Erstausleihe",
+    expander_defaults={
+        "target": False,
+        "loans": False,
+        "catalog": True,
+    },
 )
+
+filtered_data = build_filtered_data(
+    data=data,
+    filtered_users=df_users_filtered,
+    filtered_loans=df_loans_filtered,
+    filter_state=filter_info,
+)
+
+df_users_filtered = filtered_data["users"]
+df_loans_filtered = filtered_data["loans"]
+df_loans_no_date = filtered_data.get("loans_no_date", df_loans_filtered)
+df_books = filtered_data["books"]
 
 # ==============================================================================
 # 3. INFO & AKTIVE FILTER
@@ -82,16 +109,17 @@ if filter_info.get("date_range"):
 
 extra_f = filter_info.get("extra_filters", {})
 for col, vals in extra_f.items():
-    if vals and len(vals) < df_loans[col].dropna().nunique():
-        label = "Medienart" if col == "Medienart" else col
-        chips.append(f"{'🏢' if col == 'Zweigstelle' else '📚'} {', '.join(vals)}")
+    if vals and col in df_loans.columns and len(vals) < df_loans[col].dropna().nunique():
+        label = "Medienart" if col == "Medienart_catalog" else col
+        icon = "🏢" if col == "Zweigstelle_loan" else "📚"
+        chips.append(f"{icon} {', '.join(vals)}")
 
 if filter_info.get("groups") and len(filter_info["groups"]) < df_users["Benutzergruppe"].dropna().nunique():
     chips.append(f"👥 {', '.join(filter_info['groups'])}")
 
 if filter_info.get("ss_filter"):
     chips.append(f"🔑 {', '.join(filter_info['ss_filter'])}")
-c1,c2, c_meta1, c_meta2 = st.columns(4)
+c1,c_meta1, c_meta2, c_meta3 = st.columns([4,1,1,2])
 with c1:
     st.markdown("### 🔎 Aktive Filter")
     if chips:
@@ -100,9 +128,13 @@ with c1:
     else:
         st.caption("Alle Daten (keine Einschränkung)")
 
-c_meta1.metric("Gefilterte Nutzende", f"{len(df_users_filtered):,}")
-c_meta2.metric("Gefilterte Ausleihen", f"{len(df_loans_filtered):,}")
+with c_meta1:
+    kpi_box("Gefilterte Nutzende", len(df_users_filtered))
+with c_meta2:
+    kpi_box("Gefilterte Ausleihen", len(df_loans_filtered))
 
+with c_meta3:
+    kpi_box("Ø Ausleihen/Nutzende", f"{len(df_loans_filtered)/len(df_users_filtered):.1f}")
 
 # ==============================================================================
 # 4. DATENANREICHERUNG (MERGEN)
@@ -127,7 +159,7 @@ df_merged = df_loans_filtered.merge(
 
 # Benutzergruppe auflösen
 group_col_users = None
-for col in ['Benutzergruppe', 'Benutzergruppe_Gruppiert', 'Gruppe']:
+for col in ['Benutzergruppe', 'Gruppe']:
     if col in df_users_filtered.columns:
         group_col_users = col
         break
@@ -162,6 +194,73 @@ else:
 if df_merged.empty:
     st.error("Keine Daten nach dem Merge vorhanden.")
     st.stop()
+
+
+def show_unknown_media_head(df, category_col, label, rows=20):
+    if category_col not in df.columns:
+        return
+
+    unknown_mask = (
+        df[category_col].isna()
+        | df[category_col].astype(str).str.strip().eq("")
+        | df[category_col].astype(str).str.strip().eq("Unbekannt")
+    )
+    unknown = df.loc[unknown_mask].copy()
+
+    if unknown.empty:
+        return
+
+    preferred_cols = [
+        "NR Zugang",
+        "MedienTitel",
+        "Titel",
+        "MedienAutor",
+        "Verfasser I(1)",
+        "Ausleihdatum",
+        "Ausleihperson",
+        "Medienart_catalog",
+        "Standort(1)",
+        "Zweigstelle_loan"
+    ]
+    visible_cols = [col for col in preferred_cols if col in unknown.columns]
+
+    with st.expander(f"Unbekannte {label}: erste {min(rows, len(unknown))} Datensätze"):
+        st.caption(
+            f"{len(unknown):,} Ausleihdatensätze haben keinen Wert für {label}. "
+            "Das sind Kandidaten für fehlende Katalog-/Antiquariat-Treffer oder leere Katalogfelder."
+        )
+        st.dataframe(
+            unknown[visible_cols].head(rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def sort_bar_data(df, label_col, value_col, limit=10):
+    work = df.copy()
+    label = work[label_col].fillna("Unbekannt").astype(str).str.strip()
+    value = pd.to_numeric(work[value_col], errors="coerce").replace(
+        [np.inf, -np.inf],
+        np.nan,
+    )
+
+    work[label_col] = label.replace("", "Unbekannt")
+    work[value_col] = value.fillna(0)
+    work["_ohne_wert"] = (
+        work[label_col].eq("Unbekannt")
+        | work[value_col].le(0)
+    )
+
+    return (
+        work
+        .sort_values(
+            ["_ohne_wert", value_col, label_col],
+            ascending=[True, False, True],
+        )
+        .head(limit)
+        .drop(columns=["_ohne_wert"])
+    )
+
 
 # ==============================================================================
 # 5. TABS STRUKTUR
@@ -217,17 +316,66 @@ with tab_overview:
     st.divider()
  
     # --- CHART 2 & 3: ÜBERSICHT ---
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.subheader("📚 Medienart (Gesamt)")
         if "Medienart_catalog" in df_loans_filtered.columns:
             data = df_loans_filtered["Medienart_catalog"].fillna("Unbekannt").value_counts().reset_index()
             data.columns = ["Medienart", "Anzahl"]
-            st.bar_chart(data.set_index("Medienart"), use_container_width=True)
+            data = sort_bar_data(data, "Medienart", "Anzahl")
+            data_order = data["Medienart"].tolist()
+
+            chart = (
+                alt.Chart(data)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Anzahl:Q", title="Ausleihen"),
+                    y=alt.Y("Medienart:N", sort=data_order, title=""),
+                    tooltip=[
+                        alt.Tooltip("Medienart:N", title="Medienart"),
+                        alt.Tooltip("Anzahl:Q", title="Ausleihen"),
+                    ],
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(chart, use_container_width=True)
 
         else:
             st.error("Keine Daten")
     with c2:
+        st.subheader("📍 Standort (Gesamt)")
+        if "Standort(1)" in df_loans_filtered.columns:
+            data = (
+                df_loans_filtered["Standort(1)"]
+                .fillna("Unbekannt")
+                .astype(str)
+                .str.strip()
+                .replace("", "Unbekannt")
+                .value_counts()
+                .reset_index()
+            )
+            data.columns = ["Standort", "Anzahl"]
+            data = sort_bar_data(data, "Standort", "Anzahl")
+            data_order = data["Standort"].tolist()
+
+            chart = (
+                alt.Chart(data)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Anzahl:Q", title="Ausleihen"),
+                    y=alt.Y("Standort:N", sort=data_order, title=""),
+                    tooltip=[
+                        alt.Tooltip("Standort:N", title="Standort"),
+                        alt.Tooltip("Anzahl:Q", title="Ausleihen"),
+                    ],
+                )
+                .properties(height=300)
+            )
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.error("Keine Standortdaten")
+
+    with c3:
         st.subheader("📅 Wochentag (Gesamt)")
         if "Ausleihdatum" in df_loans_filtered.columns:
             df_temp = df_loans_filtered.dropna(subset=["Ausleihdatum"]).copy()
@@ -256,6 +404,125 @@ with tab_overview:
                 )
 
                 st.altair_chart(chart, use_container_width=True)
+
+    st.divider()
+    st.subheader("Wochentage im Jahresvergleich")
+    st.caption(
+        "Letzte drei verfügbare Jahre mit allen aktiven Filtern ausser dem Zeitraumfilter."
+    )
+
+    if (
+        df_loans_no_date is not None
+        and not df_loans_no_date.empty
+        and "Ausleihdatum" in df_loans_no_date.columns
+    ):
+        df_weekday_year = df_loans_no_date.copy()
+        df_weekday_year["Datum"] = pd.to_datetime(
+            df_weekday_year["Ausleihdatum"],
+            errors="coerce",
+        )
+        df_weekday_year = df_weekday_year.dropna(subset=["Datum"])
+
+        if not df_weekday_year.empty:
+            weekday_order = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+            weekday_map = {
+                "Monday": "Mo",
+                "Tuesday": "Di",
+                "Wednesday": "Mi",
+                "Thursday": "Do",
+                "Friday": "Fr",
+                "Saturday": "Sa",
+                "Sunday": "So",
+            }
+            years = sorted(df_weekday_year["Datum"].dt.year.dropna().unique())[-3:]
+            df_weekday_year = df_weekday_year[
+                df_weekday_year["Datum"].dt.year.isin(years)
+            ].copy()
+            df_weekday_year["Jahr"] = df_weekday_year["Datum"].dt.year.astype(str)
+            df_weekday_year["Wochentag"] = (
+                df_weekday_year["Datum"]
+                .dt.day_name()
+                .map(weekday_map)
+            )
+            if "Transaktion(1)" in df_weekday_year.columns:
+                df_weekday_year["Ausleihkanal"] = (
+                    df_weekday_year["Transaktion(1)"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .apply(lambda value: "App" if value.startswith("App") else "Theke")
+                )
+            else:
+                df_weekday_year["Ausleihkanal"] = "Theke"
+
+            grouped = (
+                df_weekday_year
+                .groupby(["Jahr", "Wochentag", "Ausleihkanal"])
+                .size()
+                .rename("Ausleihen")
+                .reset_index()
+            )
+            all_combinations = pd.MultiIndex.from_product(
+                [[str(year) for year in years], weekday_order, ["Theke", "App"]],
+                names=["Jahr", "Wochentag", "Ausleihkanal"],
+            )
+            grouped = (
+                grouped
+                .set_index(["Jahr", "Wochentag", "Ausleihkanal"])
+                .reindex(all_combinations, fill_value=0)
+                .reset_index()
+            )
+            grouped["Jahrestotal"] = grouped.groupby("Jahr")["Ausleihen"].transform("sum")
+            grouped["Anteil"] = np.where(
+                grouped["Jahrestotal"] > 0,
+                grouped["Ausleihen"] / grouped["Jahrestotal"] * 100,
+                0,
+            )
+
+            st.markdown(
+                """
+                <div style="display:flex; gap:18px; align-items:center; margin:.25rem 0 .5rem 0; font-size:.9rem;">
+                    <span><span style="display:inline-block;width:22px;height:12px;background:#4c78a8;border-radius:2px;margin-right:6px;"></span>Theke: dunkel</span>
+                    <span><span style="display:inline-block;width:22px;height:12px;background:#b8cce4;border-radius:2px;margin-right:6px;border:1px solid #8aa7c5;"></span>App: hell</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            chart = (
+                alt.Chart(grouped)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Wochentag:N", sort=weekday_order, title="Wochentag"),
+                    y=alt.Y("Anteil:Q", title="Anteil an Jahresausleihen (%)"),
+                    color=alt.Color("Jahr:N", title="Jahr"),
+                    opacity=alt.Opacity(
+                        "Ausleihkanal:N",
+                        title="Ausleihart",
+                        scale=alt.Scale(
+                            domain=["Theke", "App"],
+                            range=[1.0, 0.28],
+                        ),
+                        legend=None,
+                    ),
+                    xOffset=alt.XOffset("Jahr:N"),
+                    order=alt.Order("Ausleihkanal:N", sort="descending"),
+                    tooltip=[
+                        alt.Tooltip("Jahr:N", title="Jahr"),
+                        alt.Tooltip("Wochentag:N", title="Wochentag"),
+                        alt.Tooltip("Ausleihkanal:N", title="Ausleihart"),
+                        alt.Tooltip("Ausleihen:Q", title="Ausleihen", format=",.0f"),
+                        alt.Tooltip("Jahrestotal:Q", title="Jahrestotal", format=",.0f"),
+                        alt.Tooltip("Anteil:Q", title="Anteil %", format=".1f"),
+                    ],
+                )
+                .properties(height=360)
+            )
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.info("Keine gültigen Ausleihdaten für den Jahresvergleich.")
+    else:
+        st.info("Für den Jahresvergleich fehlen Ausleihdaten mit Ausleihdatum.")
 
 # ==============================================================================
 # TAB 2: VERGLEICHSANALYSE
@@ -318,15 +585,23 @@ with tab_compare:
             df_compare = df_temp[df_temp['Vergleichsgruppe'].notna()].copy()
         else:
             st.warning("Keine Altersdaten verfügbar.")
-    st.divider()
+
     # --- CHARTS FÜR VERGLEICH ---
     if df_compare is not None and not df_compare.empty:
         col1, col2, col3 = st.columns([2,2,1])
         with col1:
             # Medienart
             st.markdown("#### 📚 Medienart-Präferenzen")
-            if "Medienart" in df_compare.columns:
-                data = df_compare.groupby(['Medienart', 'Vergleichsgruppe']).size().reset_index(name='Anzahl')
+            if "Medienart_catalog" in df_compare.columns:
+                df_compare = df_compare.copy()
+                df_compare["Medienart_Anzeige"] = df_compare["Medienart_catalog"]
+                data = (
+                    df_compare
+                    .groupby(['Medienart_Anzeige', 'Vergleichsgruppe'])
+                    .size()
+                    .reset_index(name='Anzahl')
+                    .rename(columns={"Medienart_Anzeige": "Medienart"})
+                )
                 chart = alt.Chart(data).mark_bar().encode(
                     x=alt.X('Medienart:N', sort='-y'),
                     y=alt.Y('Anzahl:Q'),
@@ -338,36 +613,152 @@ with tab_compare:
                     height=350
                 ).interactive()
                 st.altair_chart(chart, width='stretch')
+            else:
+                st.write(df_compare.columns)
         with col2: 
             # Wochentag
             st.markdown("#### 📅 Ausleihtage")
             df_wd = df_compare.dropna(subset=['Ausleihdatum']).copy()
             if not df_wd.empty:
                 df_wd['Datum'] = pd.to_datetime(df_wd['Ausleihdatum'], errors='coerce')
-                df_wd['WD'] = df_wd['Datum'].dt.day_name().map({"Monday":"Mo", "Tuesday":"Di", "Wednesday":"Mi", "Thursday":"Do", "Friday":"Fr", "Saturday":"Sa", "Sunday":"So"})
-                data = df_wd.groupby(['WD', 'Vergleichsgruppe']).size().reset_index(name='Anzahl')
+                df_wd['Wochentag'] = df_wd['Datum'].dt.day_name().map({"Monday":"Mo", "Tuesday":"Di", "Wednesday":"Mi", "Thursday":"Do", "Friday":"Fr", "Saturday":"Sa", "Sunday":"So"})
+                data = df_wd.groupby(['Wochentag', 'Vergleichsgruppe']).size().reset_index(name='Anzahl')
                 chart = alt.Chart(data).mark_bar().encode(
-                    x=alt.X('WD:N', sort=["Mo","Di","Mi","Do","Fr","Sa","So"]),
+                    x=alt.X('Wochentag:N', sort=["Mo","Di","Mi","Do","Fr","Sa","So"]),
                     y=alt.Y('Anzahl:Q'),
                     color=alt.Color('Vergleichsgruppe:N', scale=alt.Scale(domain=[label_a, label_b], range=['#1f77b4', '#d62728'])),
                     xOffset='Vergleichsgruppe:N',
-                    tooltip=['WD', 'Vergleichsgruppe', 'Anzahl']
+                    tooltip=['Wochentag', 'Vergleichsgruppe', 'Anzahl']
                 ).properties(
                     title=f"Ausleihtage ({zeitraum_text})",
                     height=300
                 )
                 st.altair_chart(chart, width='stretch')
         with col3:
-            # Tabelle
-            st.markdown(f"#### 📊 Aktivitätsniveau \n(Ø Ausleihen pro Person im Zeitraum {zeitraum_text})")
-            id_col = 'Ausleihperson'
-            if id_col in df_compare.columns:
-                stats = df_compare.groupby([id_col, 'Vergleichsgruppe']).size().reset_index(name='Count')
-                avg = stats.groupby('Vergleichsgruppe')['Count'].mean().reset_index()
-                avg.columns = ['Gruppe', 'Ø Ausleihen']
-                st.dataframe(avg.style.format({'Ø Ausleihen': '{:.1f}'}), hide_index=True, width='stretch')
+            st.markdown(
+                f"#### 📚 Ø Ausleihen pro Besuch\n"
+                f"({zeitraum_text})"
+            )
+
+            id_col = "Ausleihperson"
+            date_col = "Ausleihdatum"
+
+            if id_col in df_compare.columns and date_col in df_compare.columns:
+                visits_df = df_compare[[id_col, date_col, "Vergleichsgruppe"]].copy()
+                visits_df[date_col] = pd.to_datetime(
+                    visits_df[date_col],
+                    errors="coerce"
+                )
+                visits_df = visits_df.dropna(subset=[id_col, date_col])
+                visits_df["Besuchstag"] = visits_df[date_col].dt.date
+
+                loans_total = (
+                    visits_df
+                    .groupby("Vergleichsgruppe")
+                    .size()
+                    .rename("Ausleihen")
+                )
+                visits_total = (
+                    visits_df
+                    .drop_duplicates([id_col, "Vergleichsgruppe", "Besuchstag"])
+                    .groupby("Vergleichsgruppe")
+                    .size()
+                    .rename("Besuche")
+                )
+
+                avg_loans = pd.concat([loans_total, visits_total], axis=1).fillna(0)
+                avg_loans["Ø Ausleihen pro Besuch"] = np.where(
+                    avg_loans["Besuche"] > 0,
+                    avg_loans["Ausleihen"] / avg_loans["Besuche"],
+                    0
+                )
+                avg_loans = (
+                    avg_loans["Ø Ausleihen pro Besuch"]
+                    .reset_index()
+                    .rename(columns={"Vergleichsgruppe": "Gruppe"})
+                )
+
+                st.dataframe(
+                    avg_loans.style.format({
+                        "Ø Ausleihen pro Besuch": "{:.1f}"
+                    }),
+                    hide_index=True,
+                    width="stretch"
+                )
+            else:
+                st.info("Für diese Berechnung fehlen Ausleihperson oder Ausleihdatum.")
+
+            st.markdown(
+                f"#### 🚶 Ø Besuche im Zeitraum\n"
+                f"({zeitraum_text})"
+            )
+
+            if id_col in df_compare.columns and date_col in df_compare.columns:
+                visits_df = df_compare[[id_col, date_col, "Vergleichsgruppe"]].copy()
+                visits_df[date_col] = pd.to_datetime(
+                    visits_df[date_col],
+                    errors="coerce"
+                )
+                visits_df = visits_df.dropna(subset=[id_col, date_col])
+                visits_df["Besuchstag"] = visits_df[date_col].dt.date
+
+                visits_per_person = (
+                    visits_df
+                    .groupby([id_col, "Vergleichsgruppe"])["Besuchstag"]
+                    .nunique()
+                    .reset_index(name="Besuche")
+                )
+
+                avg_visits = (
+                    visits_per_person
+                    .groupby("Vergleichsgruppe")["Besuche"]
+                    .mean()
+                    .reset_index()
+                )
+
+                avg_visits.columns = ["Gruppe", "Ø Besuche pro Person"]
+
+                st.dataframe(
+                    avg_visits.style.format({
+                        "Ø Besuche pro Person": "{:.1f}"
+                    }),
+                    hide_index=True,
+                    width="stretch"
+                )
+            else:
+                st.info("Für diese Berechnung fehlen Ausleihperson oder Ausleihdatum.")
     else:
         st.info("👈 Bitte konfigurieren Sie oben den Vergleich, um Ergebnisse zu sehen.")
+
+
+st.divider()
+st.subheader("📈 Bestandsnutzung im gefilterten Bestand")
+bestandsnutzung_ausleihen = len(df_merged)
+bestandsnutzung_bestand = len(df_books) if df_books is not None else 0
+bestandsnutzung_umlauf = (
+    bestandsnutzung_ausleihen / bestandsnutzung_bestand
+    if bestandsnutzung_bestand > 0 else 0
+)
+
+kpi_ausleihen, kpi_bestand, kpi_umlauf = st.columns(3)
+with kpi_ausleihen:
+    kpi_box(
+    "Ausleihen",
+    bestandsnutzung_ausleihen
+)
+with kpi_bestand:
+    kpi_box(
+    "Bestand",
+    bestandsnutzung_bestand
+)
+with kpi_umlauf:
+    kpi_box(
+    "Ø Ausleihen / Medium",
+    bestandsnutzung_umlauf,
+)
+st.caption(
+    "Diese Werte bilden die Basis für die Umsatz-/Bestandsnutzungsplots nach Medienart und Standort."
+)
 
 # st.subheader("📍 Ausleihen nach Medienart")
 if "Medienart_catalog" in df_merged.columns:
@@ -404,10 +795,9 @@ if "Medienart_catalog" in df_merged.columns:
                 .map(lambda x: f"{x:.1f}%")
             )
             medienart = (
-                medienart
-                .sort_values("Ausleihen", ascending=False)
-                .head(10)
+                sort_bar_data(medienart, "Medienart", "Ausleihen")
             )
+            medienart_order = medienart["Medienart"].tolist()
             bars = (
                 alt.Chart(medienart)
                 .mark_bar()
@@ -419,7 +809,7 @@ if "Medienart_catalog" in df_merged.columns:
                     ),
                     y=alt.Y(
                         "Medienart:N",
-                        sort="-x",
+                        sort=medienart_order,
                         title=""
                     ),
                     tooltip=[
@@ -444,7 +834,7 @@ if "Medienart_catalog" in df_merged.columns:
                     x="Ausleihen:Q",
                     y=alt.Y(
                         "Medienart:N",
-                        sort="-x"
+                        sort=medienart_order
                     ),
                     text="Anteil_Label:N"
                 )
@@ -500,11 +890,6 @@ if "Medienart_catalog" in df_merged.columns:
                 medienart_effizienz["Ausleihen"] /
                 medienart_effizienz["Bestand"]
             )
-            medienart_effizienz = (
-                medienart_effizienz
-                .sort_values("Umlauf", ascending=False)
-                .head(10)
-            )
             medienart_effizienz["Bestandsanteil"] = (
                 medienart_effizienz["Bestand"]
                 / medienart_effizienz["Bestand"].sum()
@@ -520,16 +905,27 @@ if "Medienart_catalog" in df_merged.columns:
             )
             gesamt_ausleihen = medienart_effizienz["Ausleihen"].sum()
             gesamt_bestand = medienart_effizienz["Bestand"].sum()
+            medienart_umlauf = sort_bar_data(
+                medienart_effizienz,
+                "Medienart",
+                "Umlauf",
+            )
+            medienart_effizienz_plot = sort_bar_data(
+                medienart_effizienz,
+                "Medienart",
+                "Effizienz",
+            )
+            medienart_umlauf_order = medienart_umlauf["Medienart"].tolist()
+            medienart_effizienz_order = medienart_effizienz_plot["Medienart"].tolist()
 
             gesamt_umlauf = (
                 gesamt_ausleihen / gesamt_bestand
                 if gesamt_bestand > 0 else 0
             )
-            st.markdown("**📈 Umsatz (Ausleihen/ Bestand)** "
-                        f"Gesamt: **{gesamt_umlauf:.2f}** Ausleihen je Medium")
-                        
+            st.markdown("**📈 Umsatz (Ausleihen / Bestand)**")
+                         
             chart = (
-                alt.Chart(medienart_effizienz)
+                alt.Chart(medienart_umlauf)
                 .mark_bar()
                 .encode(
                     x=alt.X(
@@ -539,7 +935,7 @@ if "Medienart_catalog" in df_merged.columns:
                     ),
                     y=alt.Y(
                         "Medienart:N",
-                        sort="-x",
+                        sort=medienart_umlauf_order,
                         title=""
                     ),
                     tooltip=[
@@ -571,7 +967,7 @@ if "Medienart_catalog" in df_merged.columns:
             )
                         
             chart = (
-                alt.Chart(medienart_effizienz)
+                alt.Chart(medienart_effizienz_plot)
                 .mark_bar()
                 .encode(
                     x=alt.X(
@@ -581,7 +977,7 @@ if "Medienart_catalog" in df_merged.columns:
                     ),
                     y=alt.Y(
                         "Medienart:N",
-                        sort="-x",
+                        sort=medienart_effizienz_order,
                         title=""
                     ),
                     tooltip=[
@@ -601,6 +997,8 @@ if "Medienart_catalog" in df_merged.columns:
                 chart+rule,
                 use_container_width=True
             )
+
+        show_unknown_media_head(df_merged, "Medienart_catalog", "Medienarten")
 # st.subheader("📍 Ausleihen nach Standort")
 
 if "Standort(1)" in df_merged.columns:
@@ -637,10 +1035,9 @@ if "Standort(1)" in df_merged.columns:
                 .map(lambda x: f"{x:.1f}%")
             )
             standort = (
-                standort
-                .sort_values("Ausleihen", ascending=False)
-                .head(10)
+                sort_bar_data(standort, "Standort", "Ausleihen")
             )
+            standort_order = standort["Standort"].tolist()
 
             bars = (
                 alt.Chart(standort)
@@ -653,7 +1050,7 @@ if "Standort(1)" in df_merged.columns:
                     ),
                     y=alt.Y(
                         "Standort:N",
-                        sort="-x",
+                        sort=standort_order,
                         title=""
                     ),
                     tooltip=[
@@ -678,7 +1075,7 @@ if "Standort(1)" in df_merged.columns:
                     x="Ausleihen:Q",
                     y=alt.Y(
                         "Standort:N",
-                        sort="-x"
+                        sort=standort_order
                     ),
                     text="Anteil_Label:N"
                 )
@@ -745,22 +1142,28 @@ if "Standort(1)" in df_merged.columns:
                 standort_effizienz['Ausleihanteil']
                 / standort_effizienz['Bestandesanteil']
             )
-            standort_effizienz = (
-                standort_effizienz
-                .sort_values('Umlauf', ascending=False)
-                .head(10)
-            )
             gesamt_ausleihen = standort_effizienz["Ausleihen"].sum()
             gesamt_bestand = standort_effizienz["Bestand"].sum()
+            standort_umlauf = sort_bar_data(
+                standort_effizienz,
+                "Standort",
+                "Umlauf",
+            )
+            standort_effizienz_plot = sort_bar_data(
+                standort_effizienz,
+                "Standort",
+                "Effizienz",
+            )
+            standort_umlauf_order = standort_umlauf["Standort"].tolist()
+            standort_effizienz_order = standort_effizienz_plot["Standort"].tolist()
 
             gesamt_umlauf = (
                 gesamt_ausleihen / gesamt_bestand
                 if gesamt_bestand > 0 else 0
             )
-            st.markdown("**📈 Bestandsnutzung (Umsatz)** "
-                        f"Gesamt **{gesamt_umlauf:.2f}** Ausleihen je Medium)")
+            st.markdown("**📈 Bestandsnutzung (Umsatz)**")
             chart = (
-                alt.Chart(standort_effizienz)
+                alt.Chart(standort_umlauf)
                 .mark_bar()
                 .encode(
                     x=alt.X(
@@ -770,7 +1173,7 @@ if "Standort(1)" in df_merged.columns:
                     ),
                     y=alt.Y(
                         "Standort:N",
-                        sort="-x",
+                        sort=standort_umlauf_order,
                         title=""
                     ),
                     tooltip=[
@@ -803,7 +1206,7 @@ if "Standort(1)" in df_merged.columns:
             )
                         
             chart = (
-                alt.Chart(standort_effizienz)
+                alt.Chart(standort_effizienz_plot)
                 .mark_bar()
                 .encode(
                     x=alt.X(
@@ -813,7 +1216,7 @@ if "Standort(1)" in df_merged.columns:
                     ),
                     y=alt.Y(
                         "Standort:N",
-                        sort="-x",
+                        sort=standort_effizienz_order,
                         title=""
                     ),
                     tooltip=[
@@ -833,3 +1236,5 @@ if "Standort(1)" in df_merged.columns:
                 chart+rule,
                 use_container_width=True
             )
+
+        show_unknown_media_head(df_merged, "Standort(1)", "Standorte")

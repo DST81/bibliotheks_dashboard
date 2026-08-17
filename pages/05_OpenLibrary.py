@@ -1,18 +1,17 @@
 import streamlit as st
-from components.sidebar import render_sidebar
-from components.ui import kpi_box
-from src.utils import  load_data, apply_group_mapping
-from src.filters import apply_filters
-import streamlit as st
 import json
 from pathlib import Path
 import os
 import pandas as pd
+import numpy as np
 import altair as alt
+
+from components.ui import kpi_box
+from src.filters import get_sidebar_filters
 
 
 st.set_page_config(page_title="Open-Library-Zutritte", page_icon="📲", layout="wide")
-st.title("📲 OpenLibrary Zutritte")
+
 # --- 1. Konfiguration laden ---
 CONFIG_PATH = Path("data/config.json")
 
@@ -31,44 +30,53 @@ else:
     st.warning(f"Datei {CONFIG_PATH} nicht gefunden. Verwende Standardwerte.")
 
 # Prüfen, ob Daten geladen wurden
-if 'data' not in st.session_state or st.session_state['data'] is None:
-    st.error("Keine Daten geladen. Bitte starten Sie das Dashboard über die [Startseite](../app.py).")
+if "data" not in st.session_state or st.session_state["data"] is None:
+    st.error("Keine Daten geladen. Bitte starten Sie das Dashboard über die Startseite.")
     st.stop()
 
-data = st.session_state['data']
-df_users = data.get("users")
-df_ausleihe = data.get("loans") 
-df_smart =data.get("smartlibrary")
+data = st.session_state["data"]
+df_users = data.get("users", pd.DataFrame())
+df_smart = data.get("smartlibrary", pd.DataFrame())
+df_loans = data.get("loans", pd.DataFrame())
 
-if df_users is None:
-    st.warning("Keine Nutzerdaten verfügbar.")
+if df_smart is None or df_smart.empty:
+    st.info("Keine OpenLibrary-Protokolldaten verfügbar.")
     st.stop()
 
-if df_smart is None:
-    st.warning("Keine OpenLibrary-Protokolldaten verfügbar.")
-    st.stop()
-df_users = apply_group_mapping(df_users, config)
-filters = render_sidebar(df_ausleihe, config)
-
-min_datum = df_smart['erstellt'].min()
-max_datum = df_smart['erstellt'].max()
-
-st.sidebar.caption(
-    f"Verfügbare Daten: {min_datum:%d.%m.%Y} bis {max_datum:%d.%m.%Y}"
+filtered_users, filtered_smart, filter_info = get_sidebar_filters(
+    df_users=df_users,
+    df_extra=df_smart,
+    prefix="openlibrary",
+    enable_date_filter=True,
+    date_col_name="erstellt",
+    enable_first_loan_toggle=False,
+    show_metrics=True,
+    expander_defaults={
+        "target": False,
+        "loans": True,
+        "catalog": False,
+    },
+    expander_labels={
+        "loans": "🔓 Zutritte",
+    },
 )
-filtered_df = apply_filters(
-    df_ausleihe,
-    filters["date_range"],
-    filters.get("Zweigstelle", []),
-    filters.get("Medienart", []),
-    filters.get("Benutzergruppe", []),
-    filters.get("Kategorie Alter", [])
-)
+
+df_users = filtered_users.copy()
+df_smart = filtered_smart.copy() if filtered_smart is not None else pd.DataFrame()
+
+if "erstellt" in df_smart.columns:
+    min_datum = pd.to_datetime(df_smart["erstellt"], errors="coerce").min()
+    max_datum = pd.to_datetime(df_smart["erstellt"], errors="coerce").max()
+    if pd.notna(min_datum) and pd.notna(max_datum):
+        st.sidebar.caption(
+            f"Verfügbare Zutritte: {min_datum:%d.%m.%Y} bis {max_datum:%d.%m.%Y}"
+        )
 # Datumsfelder in datetime umwandeln
-df_users["Ablauf_Beitrag"] = pd.to_datetime(
-    df_users["Ablauf_Beitrag"],
-    errors="coerce"
-)
+if "Ablauf_Beitrag" in df_users.columns:
+    df_users["Ablauf_Beitrag"] = pd.to_datetime(
+        df_users["Ablauf_Beitrag"],
+        errors="coerce"
+    )
 
 for i in range(1, 11):
     col = f"Abo_bezahlt_bis({i})"
@@ -83,31 +91,39 @@ for i in range(1, 11):
 # =====================================================
 
 df_open = df_smart.copy()
-user_cols = ["Nummer", "Benutzergruppe"]
 
-df_open = df_open.merge(
-    df_users[user_cols],
-    on="Nummer",
-    how="left"
-)
-if filters.get("Benutzergruppe"):
-    df_open = df_open[
-        df_open["Benutzergruppe"].isin(filters["Benutzergruppe"])
-    ]
+if "Nummer" in df_open.columns:
+    df_open["Nummer"] = (
+        df_open["Nummer"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+if "Nummer" in df_open.columns and "Nummer" in df_users.columns:
+    aktive_benutzer = (
+        df_users["Nummer"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .unique()
+    )
+    df_open = df_open[df_open["Nummer"].isin(aktive_benutzer)]
+
+user_cols = [col for col in ["Nummer", "Benutzergruppe"] if col in df_users.columns]
+
+if "Nummer" in df_open.columns and "Nummer" in df_users.columns and user_cols:
+    df_open = df_open.merge(
+        df_users[user_cols].assign(Nummer=df_users["Nummer"].astype(str).str.strip()).drop_duplicates("Nummer"),
+        on="Nummer",
+        how="left"
+    )
+
 df_open["erstellt"] = pd.to_datetime(
     df_open["erstellt"],
     errors="coerce"
 )
 
-date_range = filters.get("date_range")
-
-if isinstance(date_range, (list,tuple)) and len(date_range)==2:
-    start, ende = date_range
-    start = pd.Timestamp(start)
-    ende = pd.Timestamp(ende) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-    df_open = df_open[
-        df_open['erstellt'].between(start,ende)
-    ]
 if df_open.empty:
     st.info("Für die gewählten Filter sind keine Zutritte vorhanden")
     st.stop()
@@ -232,6 +248,71 @@ durchschnitt = round(
     gesamt_zutritte / zeitraum,
     1
 )
+besucher_pro_tag = round(
+    anzahl_besucher / zeitraum,
+    1,
+)
+zutritte_pro_besucher = round(
+    gesamt_zutritte / anzahl_besucher,
+    1,
+) if anzahl_besucher > 0 else 0
+
+df_loans_open = pd.DataFrame()
+if (
+    df_loans is not None
+    and not df_loans.empty
+    and "Ausleihperson" in df_loans.columns
+    and "Ausleihdatum" in df_loans.columns
+):
+    zutrittskunden = (
+        df_open["Nummer"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .unique()
+    )
+    start_datum = df_open["Datum"].min()
+    ende_datum = df_open["Datum"].max()
+
+    df_loans_open = df_loans.copy()
+    df_loans_open["Ausleihperson"] = (
+        df_loans_open["Ausleihperson"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    df_loans_open["Ausleihdatum"] = pd.to_datetime(
+        df_loans_open["Ausleihdatum"],
+        errors="coerce",
+    )
+    df_loans_open = df_loans_open[
+        df_loans_open["Ausleihperson"].isin(zutrittskunden)
+        & df_loans_open["Ausleihdatum"].dt.date.between(start_datum, ende_datum)
+    ].copy()
+    df_loans_open["Jahr"] = df_loans_open["Ausleihdatum"].dt.isocalendar().year
+    df_loans_open["Kalenderwoche"] = df_loans_open["Ausleihdatum"].dt.isocalendar().week
+    if "erstellt" in df_loans_open.columns:
+        df_loans_open["Ausleihzeit"] = pd.to_datetime(
+            df_loans_open["erstellt"],
+            errors="coerce",
+        )
+    else:
+        df_loans_open["Ausleihzeit"] = df_loans_open["Ausleihdatum"]
+
+    df_loans_open["Stunde"] = df_loans_open["Ausleihzeit"].dt.hour
+    df_loans_open["Wochentag"] = (
+        df_loans_open["Ausleihzeit"]
+        .dt.dayofweek
+        .map(wochentage)
+    )
+
+ausleihen_zutrittskunden = len(df_loans_open)
+ausleihen_pro_zutritt = round(
+    ausleihen_zutrittskunden / gesamt_zutritte,1
+    if gesamt_zutritte > 0
+    else 0
+)
+
 wochen = (
     df_open
     .groupby(["Jahr","Kalenderwoche"])
@@ -248,37 +329,65 @@ monate = (
     .size()
 )
 durchschnitt_pro_monat = round(monate.mean(), 1)
-c1, c2 =st.columns(2)
-with c1:
+
+col1, col2=st.columns([3,1])
+with col1:
+    st.title("📲 OpenLibrary Zutritte")
+
+with col2:
+    kpi_box("📅 Zeitraum",zeitraum, suffix= "Tage")
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+abo_col1, abo_col2 = st.columns(2)
+with abo_col1:
     kpi_box("🔑 Aktive OpenLibrary-Abos",anzahl_aktiv,previous=anzahl_open_abos,previous_label="Total registrierte:")
 
-with c2:
+with abo_col2:
     farbe = "#C62828" if quote_abgelaufen > 10 else "#2E7D32"
     kpi_box("⚠️ Abgelaufene Abos",anzahl_abgelaufen,previous=f"{quote_abgelaufen:.1f} %",previous_label="Anteil",color=farbe)
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-c1, c2, c3 = st.columns(3)
+nutzung_col1, nutzung_col2, nutzung_col3, c1,c2,c3 = st.columns(6)
+
+with nutzung_col1:
+    kpi_box(
+        "🏛️ Total Zutritte im Zeitraum",
+        gesamt_zutritte,
+        previous=durchschnitt,
+        previous_label="Zutritte pro Tag",
+    )
+
+with nutzung_col2:
+    kpi_box(
+        "👤 Total Besucher im Zeitraum",
+        anzahl_besucher,
+        previous=zutritte_pro_besucher,
+        previous_label="Zutritte / Besucher",
+    )
+
+with nutzung_col3:
+    kpi_box(
+        "📚 Ausleihen Zutrittskunden",
+        ausleihen_zutrittskunden,
+        previous=ausleihen_pro_zutritt,
+        previous_label="Ø-Ausleihen / Zutritt",
+    )
+
 
 with c1:
-    kpi_box("🏛️ Total Zutritte im Zeitraum",gesamt_zutritte)
+    kpi_box("📈 Ø Zutritte / Tag",durchschnitt,previous="-")
 
 with c2:
-    kpi_box("👤 Total Besucher im Zeitraum",anzahl_besucher)
+    kpi_box("📅 Ø / Woche",durchschnitt_pro_woche,previous="-")
 
 with c3:
-    kpi_box("📅 Zeitraum",zeitraum, suffix= "Tage")
-
-
+    kpi_box("🗓️ Ø / Monat",durchschnitt_pro_monat,previous="-")
 
 st.markdown("<br>", unsafe_allow_html=True)  
 
 # =====================================================
-# ZUTRITTE PRO Woche
-# =====================================================
-
-st.subheader("📈 Zutritte nach Kalenderwoche - Woche auswählen")
-
 reihenfolge = [
     "Montag",
     "Dienstag",
@@ -289,12 +398,34 @@ reihenfolge = [
     "Sonntag"
 ]
 
-wochentage = (
-    df_open
-    .groupby(["Jahr","Kalenderwoche","Wochentag"])
-    .size()
-    .reset_index(name="Zutritte")
-)
+openlibrary_config = config.get("openlibrary", {})
+oeffnung_start = int(openlibrary_config.get("start_stunde", 6))
+oeffnung_ende = int(openlibrary_config.get("end_stunde", 23))
+oeffnung_start = min(max(oeffnung_start, 0), 23)
+oeffnung_ende = min(max(oeffnung_ende, oeffnung_start), 23)
+stunden_range = range(oeffnung_start, oeffnung_ende + 1)
+stunden_sort = [f"{i:02d}-{i + 1:02d}" for i in stunden_range]
+
+tage_anzahl = pd.Series(0, index=reihenfolge, dtype=int)
+if not df_open.empty:
+    alle_tage = pd.date_range(
+        df_open["Datum"].min(),
+        df_open["Datum"].max(),
+        freq="D",
+    )
+    tage_anzahl = (
+        pd.Series([reihenfolge[tag.weekday()] for tag in alle_tage])
+        .value_counts()
+        .reindex(reihenfolge)
+        .fillna(0)
+        .astype(int)
+    )
+
+# ZUTRITTE / AUSLEIHEN PRO WOCHE
+# =====================================================
+
+st.subheader("📈 Zutritte und Ausleihen nach Kalenderwoche")
+
 
 df_open["Wochentag"] = pd.Categorical(
     df_open["Wochentag"],
@@ -302,24 +433,31 @@ df_open["Wochentag"] = pd.Categorical(
     ordered=True
 )
 
-pro_tag = (
-    df_open
-    .groupby(
-        [
-            "Jahr",
-            "Kalenderwoche",
-            "Wochentag"
-        ]
-    )
-    .size()
-    .reset_index(name="Zutritte")
-)
 pro_woche = (
     df_open
     .groupby(["Jahr", "Kalenderwoche"])
     .size()
     .reset_index(name="Zutritte")
 )
+ausleihen_pro_woche = (
+    df_loans_open
+    .groupby(["Jahr", "Kalenderwoche"])
+    .size()
+    .reset_index(name="Ausleihen")
+    if not df_loans_open.empty
+    else pd.DataFrame(columns=["Jahr", "Kalenderwoche", "Ausleihen"])
+)
+pro_woche = pro_woche.merge(
+    ausleihen_pro_woche,
+    on=["Jahr", "Kalenderwoche"],
+    how="left",
+)
+pro_woche["Ausleihen"] = pro_woche["Ausleihen"].fillna(0).astype(int)
+pro_woche["Ausleihen_pro_Zutritt"] = np.where(
+    pro_woche["Zutritte"] > 0,
+    pro_woche["Ausleihen"] / pro_woche["Zutritte"],
+    0,
+).round(1)
 pro_woche["Wochenstart"] = pd.to_datetime(
     pro_woche["Jahr"].astype(str)
     + "-W"
@@ -327,19 +465,33 @@ pro_woche["Wochenstart"] = pd.to_datetime(
     + "-1",
     format="%G-W%V-%u"
 )
-
 pro_woche["Wochenende"] = pro_woche["Wochenstart"] + pd.Timedelta(days=6)
-
 pro_woche["Woche"] = (
     pro_woche["Wochenstart"].dt.strftime("%d.%m.")
-    + " – "
+    + " - "
     + pro_woche["Wochenende"].dt.strftime("%d.%m.%Y")
 )
-
-letzte_woche= (
-    pro_woche
-    .sort_values(["Jahr", "Kalenderwoche"])
-    .iloc[-1]
+pro_woche["KW_Label"] = (
+    pro_woche["Jahr"].astype(str)
+    + " / KW "
+    + pro_woche["Kalenderwoche"].astype(str).str.zfill(2)
+)
+pro_woche["Auswahl"] = pro_woche["KW_Label"] + " (" + pro_woche["Woche"] + ")"
+pro_woche = pro_woche.sort_values("Wochenstart").reset_index(drop=True)
+pro_woche_chart = pro_woche.melt(
+    id_vars=[
+        "Jahr",
+        "Kalenderwoche",
+        "Wochenstart",
+        "Woche",
+        "KW_Label",
+    ],
+    value_vars=[
+        "Zutritte",
+        "Ausleihen",
+    ],
+    var_name="Kennzahl",
+    value_name="Anzahl",
 )
 
 ferien = [
@@ -349,373 +501,849 @@ ferien = [
 ]
 
 aktive_ferien = st.pills(
-    "Ferien aus-/abwählen",
+    "Ferien anzeigen",
     options=[f["name"] for f in ferien],
     selection_mode="multi",
-    default=[f["name"] for f in ferien]
+    default=[f["name"] for f in ferien],
+    key="openlibrary_ferien_auswahl",
 )
+
+ferien = [
+    f
+    for f in ferien
+    if f["name"] in aktive_ferien
+]
 
 ferien_bereiche = []
-
 for f in ferien:
+    start_kw = int(f["start_kw"])
+    ende_kw = int(f["end_kw"])
 
-    if f["name"] not in aktive_ferien:
-        continue
+    for jahr in pro_woche["Jahr"].dropna().unique():
+        jahr = int(jahr)
+        if start_kw <= ende_kw:
+            wochen = pro_woche[
+                (pro_woche["Jahr"] == jahr)
+                & pro_woche["Kalenderwoche"].between(start_kw, ende_kw)
+            ]
+        else:
+            wochen = pro_woche[
+                (pro_woche["Jahr"] == jahr)
+                & (
+                    (pro_woche["Kalenderwoche"] >= start_kw)
+                    | (pro_woche["Kalenderwoche"] <= ende_kw)
+                )
+            ]
 
-    start = int(f["start_kw"])
-    ende = int(f["end_kw"])
-
-    # normale Ferien
-    if start <= ende:
-
-        ferien_bereiche.append({
-            "Ferien": f["name"],
-            "start_kw": start,
-            # +1 damit die Endwoche komplett eingefärbt wird
-            "end_kw": ende + 0.5,
-            "farbe": f["farbe"]
-        })
-
-    # Jahreswechsel
-    else:
-
-        ferien_bereiche.append({
-            "Ferien": f["name"],
-            "start_kw": start,
-            "end_kw": 52,
-            "farbe": f["farbe"]
-        })
+        if wochen.empty:
+            continue
 
         ferien_bereiche.append({
             "Ferien": f["name"],
-            "start_kw": 0.5,
-            "end_kw": ende + 0.5,
-            "farbe": f["farbe"]
+            "start": wochen["Wochenstart"].min(),
+            "ende": wochen["Wochenende"].max(),
+            "farbe": f["farbe"],
         })
-selection = alt.selection_point(
-    name="kw_select",
-    fields=[
-        "Jahr",
-        "Kalenderwoche"
-    ],
-    empty="none"
-)
-punkte = (
-    alt.Chart(pro_woche)
-    .mark_circle(
-        size=100
-        )
-    .encode(
-        x="Kalenderwoche:Q",
-        y="Zutritte:Q",
-        color=alt.condition(
-            selection,
-            alt.value("red"),
-            alt.Color("Jahr:N", legend=None)
-        ),
-        tooltip=[
-            "Jahr",
-            alt.Tooltip("Kalenderwoche:Q", title="KW"),
-            alt.Tooltip("Woche:N", title="Zeitraum"),
-            "Zutritte"
-        ]
-    )
-    .add_params(selection)
-)
 
 ferien_df = pd.DataFrame(ferien_bereiche)
-
 ferien_layer = alt.layer()
+ferien_kw = []
+for f in ferien:
+    start_kw = int(f["start_kw"])
+    ende_kw = int(f["end_kw"])
 
-for _, f in ferien_df.iterrows():
-
-    layer = (
-        alt.Chart(pd.DataFrame([f]))
-        .mark_rect(
-            opacity=0.20
+    if start_kw <= ende_kw:
+        passende_ferien = ferien_df[ferien_df["Ferien"] == f["name"]]
+        ferien_zeitraum = (
+            f"{passende_ferien['start'].min():%d.%m.%Y} - "
+            f"{passende_ferien['ende'].max():%d.%m.%Y}"
+            if not passende_ferien.empty
+            else f"KW {start_kw} - {ende_kw}"
         )
+        ferien_kw.append({
+            "Ferien": f["name"],
+            "start_kw": start_kw - 0.5,
+            "end_kw": ende_kw + 0.5,
+            "Zeitraum": ferien_zeitraum,
+            "KW": f"KW {start_kw} - {ende_kw}",
+            "farbe": f["farbe"],
+        })
+    else:
+        passende_ferien = ferien_df[ferien_df["Ferien"] == f["name"]]
+        ferien_zeitraum = (
+            f"{passende_ferien['start'].min():%d.%m.%Y} - "
+            f"{passende_ferien['ende'].max():%d.%m.%Y}"
+            if not passende_ferien.empty
+            else f"KW {start_kw} - {ende_kw}"
+        )
+        ferien_kw.append({
+            "Ferien": f["name"],
+            "start_kw": start_kw - 0.5,
+            "end_kw": 53.5,
+            "Zeitraum": ferien_zeitraum,
+            "KW": f"KW {start_kw} - 53",
+            "farbe": f["farbe"],
+        })
+        ferien_kw.append({
+            "Ferien": f["name"],
+            "start_kw": 0.5,
+            "end_kw": ende_kw + 0.5,
+            "Zeitraum": ferien_zeitraum,
+            "KW": f"KW 1 - {ende_kw}",
+            "farbe": f["farbe"],
+        })
+
+ferien_kw_df = pd.DataFrame(ferien_kw)
+if not ferien_kw_df.empty:
+    ferien_layer = (
+        alt.Chart(ferien_kw_df)
+        .mark_rect(opacity=0.10)
         .encode(
-            x="start_kw:Q",
-            x2="end_kw:Q",
-            color=alt.value(f["farbe"]),
+            x=alt.X("start_kw:Q"),
+            x2=alt.X2("end_kw:Q"),
+            color=alt.Color(
+                "Ferien:N",
+                legend=alt.Legend(
+                    orient="top",
+                    direction="horizontal",
+                ),
+            ),
             tooltip=[
                 alt.Tooltip("Ferien:N"),
-                alt.Tooltip("start_kw:Q", title="Start KW"),
-                alt.Tooltip("end_kw:Q", title="Ende KW")
-            ]
+                alt.Tooltip("Zeitraum:N"),
+                alt.Tooltip("KW:N", title="Kalenderwochen"),
+            ],
         )
     )
 
-    ferien_layer += layer
-linien = (
+ausleihen_balken = (
+    alt.Chart(pro_woche)
+    .mark_bar(opacity=0.22, color="#64748b")
+    .encode(
+        x=alt.X(
+            "Kalenderwoche:Q",
+            scale=alt.Scale(domain=[1, 53], nice=False),
+            axis=alt.Axis(values=list(range(1, 54, 2)), labelAngle=0),
+            title="Kalenderwoche",
+        ),
+        y=alt.Y(
+            "Ausleihen:Q",
+            title="Ausleihen",
+            axis=alt.Axis(orient="right"),
+        ),
+        tooltip=[
+            alt.Tooltip("Jahr:N"),
+            alt.Tooltip("KW_Label:N", title="Kalenderwoche"),
+            alt.Tooltip("Woche:N", title="Zeitraum"),
+            alt.Tooltip("Ausleihen:Q", title="Ausleihen dieser Kunden"),
+            alt.Tooltip("Ausleihen_pro_Zutritt:Q", title="Ausleihen / Zutritt"),
+        ],
+    )
+)
+
+zutritte_linie = (
     alt.Chart(pro_woche)
     .mark_line(point=True, strokeWidth=3)
     .encode(
         x=alt.X(
             "Kalenderwoche:Q",
-            scale=alt.Scale(domain=[1,53], nice=False),
-            axis=alt.Axis(values=list(range(1, 53))),
-            title="Kalenderwoche"
+            scale=alt.Scale(domain=[1, 53], nice=False),
+            axis=alt.Axis(values=list(range(1, 54, 2)), labelAngle=0),
+            title="Kalenderwoche",
         ),
         y=alt.Y(
             "Zutritte:Q",
-            title="Zutritte"
+            title="Zutritte",
         ),
         color=alt.Color(
             "Jahr:N",
             title="Jahr",
             legend=alt.Legend(
                 orient="top",
-                direction="horizontal"
-            )
+                direction="horizontal",
+            ),
         ),
         tooltip=[
-            "Jahr",
-            "Kalenderwoche",
-            "Zutritte"
-        ]
+            alt.Tooltip("Jahr:N"),
+            alt.Tooltip("KW_Label:N", title="Kalenderwoche"),
+            alt.Tooltip("Woche:N", title="Zeitraum"),
+            alt.Tooltip("Zutritte:Q", title="Zutritte"),
+            alt.Tooltip("Ausleihen:Q", title="Ausleihen dieser Kunden"),
+            alt.Tooltip("Ausleihen_pro_Zutritt:Q", title="Ausleihen / Zutritt"),
+        ],
     )
-    .add_params(selection)
 )
 
-detail = (
-    alt.Chart(pro_tag)
-    .transform_filter(selection)
-    .transform_window(
-        row_number='row_number()',
-        sort=[
-            alt.SortField("Jahr", order="descending"),
-            alt.SortField("Kalenderwoche", order="descending")
-        ]
-    )
-    .transform_filter(
-        "datum.row_number <8"
-    )
-    .mark_bar(size=25)
-    .encode(
-        y=alt.Y(
-            "Wochentag:N",
-            sort=reihenfolge,
-            title=""
-        ),
-        x=alt.X(
-            "Zutritte:Q",
-            axis=alt.Axis(format="d")
-        ),
-        tooltip=[
-            "Wochentag",
-            "Zutritte"
-        ]
-    )
-    .properties(
-        width=400,
-        height=320
-    )
-)
-chart = (
+zutritte_chart = (
     alt.layer(
         ferien_layer,
-        linien,
-        punkte
+        ausleihen_balken,
+        zutritte_linie,
     )
     .resolve_scale(
-        color="independent"
-    )
-    .properties(
-        width=600,
-        height=320,
-    )
-)
-titel_text = f"Verteilung der Zutritte vom  {letzte_woche['Woche']}"
-
-titel = (
-    alt.Chart(pro_woche)
-    .transform_filter(selection)
-    .transform_window(
-        row_number="row_number()",
-        sort=[
-            alt.SortField("Jahr", order="descending"),
-            alt.SortField("Kalenderwoche", order="descending")
-        ]
-    )
-    .transform_filter(
-        "datum.row_number == 1"
-    )
-    .transform_calculate(
-        label="'Verteilung der Zutritte vom ' + datum.Woche"
-    )
-    .mark_text(
-        fontSize=16,
-        fontWeight="bold",
-        align="left",
-        baseline="middle"
-    )
-    .encode(
-        text="label:N"
-    )
-    .properties(
-        width=100,
-        height=30
-    )
-)
-gesamtchart = (
-    alt.hconcat(
-        chart,
-        titel,
-        detail
-    )
-)
-
-st.altair_chart(
-    gesamtchart,
-    on_select="rerun",
-    use_container_width=False
-)
-# =====================================================
-# ZUTRITTE NACH STUNDE
-# =====================================================
-reihenfolge = [
-    "Montag",
-    "Dienstag",
-    "Mittwoch",
-    "Donnerstag",
-    "Freitag",
-    "Samstag",
-    "Sonntag"
-]
-
-st.subheader("🕒 Zutritte nach Stunde")
-
-ausgewaehlte_tage = st.pills(
-    "Wochentage",
-    reihenfolge,
-    selection_mode='multi',
-    default=reihenfolge
-)
-stunden = (
-    df_open[
-        df_open["Wochentag"].isin(ausgewaehlte_tage)
-    ]
-    .groupby(["Stunde", "Wochentag"])
-    .size()
-    .reset_index(name="Zutritte")
-)
-
-stunden["Wochentag"] = pd.Categorical(
-    stunden["Wochentag"],
-    categories=reihenfolge,
-    ordered=True
-)
-stunden["Stunden_label"] = stunden["Stunde"].map(lambda x: f"{x:02d}:00")
-
-chart = (
-    alt.Chart(stunden)
-    .mark_bar()
-    .encode(
-        x=alt.X(
-            "Stunden_label:N",
-            sort=[f"{i:02d}:00" for i in range(24)],
-            title="Uhrzeit"
-        ),
-        xOffset=alt.XOffset(
-            "Wochentag:N",
-            sort=reihenfolge
-        ),
-        y=alt.Y(
-            "Zutritte:Q",
-            title="Zutritte"
-        ),
-        color=alt.Color(
-            "Wochentag:N",
-            sort=reihenfolge,
-            legend=alt.Legend(orient="bottom")
-        ),
-        tooltip=[
-            alt.Tooltip("Wochentag:N"),
-            alt.Tooltip("Stunden_label:N", title="Uhrzeit"),
-            alt.Tooltip("Zutritte:Q")
-        ]
-    )
-    .properties(height=320)
-)
-
-st.altair_chart(chart, use_container_width=True)
-# =====================================================
-# ZUTRITTE NACH WOCHENTAG
-# =====================================================
-
-st.subheader("📅 Zutritte nach Wochentag")
-
-
-tage = (
-    df_open
-    .groupby("Wochentag")
-    .size()
-    .reindex(reihenfolge)
-    .fillna(0)
-    .reset_index(name="Zutritte")
-)
-
-chart = (
-    alt.Chart(tage)
-    .mark_bar()
-    .encode(
-        x=alt.X(
-            "Wochentag:N",
-            sort=reihenfolge
-        ),
-        y="Zutritte:Q",
-        tooltip=["Wochentag","Zutritte"]
+        color="independent",
+        y="independent",
     )
     .properties(height=300)
 )
 
-st.altair_chart(chart, use_container_width=True)
+st.altair_chart(zutritte_chart, use_container_width=True)
 
-c1, c2, c3 = st.columns(3)
-with c1:
-    kpi_box("📈 Ø Zutritte / Tag",durchschnitt)
+col1, col2 =st.columns([3,1])
+if not pro_woche.empty:
+    with col2:
+        auswahl_optionen = pro_woche["Auswahl"].tolist()
+        ausgewaehlte_woche = st.selectbox(
+            "Woche auswählen",
+            options=auswahl_optionen,
+            index=len(auswahl_optionen) - 1,
+            key="openlibrary_kw_auswahl",
+        )
 
-with c2:
-    kpi_box("📅 Ø / Woche",durchschnitt_pro_woche)
+    woche_row = pro_woche.loc[
+        pro_woche["Auswahl"] == ausgewaehlte_woche
+    ].iloc[0]
 
-with c3:
-    kpi_box("🗓️ Ø / Monat",durchschnitt_pro_monat)
-
-stunden_tag = (
-    df_open
-    .groupby(["Wochentag", "Stunde"])
-    .size()
-    .reset_index(name="Zutritte")
-)
-
-stunden_tag["Wochentag"] = pd.Categorical(
-    stunden_tag["Wochentag"],
-    categories=reihenfolge,
-    ordered=True
-)
-
-heatmap = (
-    alt.Chart(stunden_tag)
-    .mark_rect()
-    .encode(
-        x=alt.X("Stunde:O", title="Stunde"),
-        y=alt.Y("Wochentag:N", sort=reihenfolge),
-        color=alt.Color("Zutritte:Q", title="Zutritte"),
-        tooltip=[
-            "Wochentag",
-            "Stunde",
-            "Zutritte"
+    pro_tag = (
+        df_open[
+            (df_open["Jahr"] == woche_row["Jahr"])
+            & (df_open["Kalenderwoche"] == woche_row["Kalenderwoche"])
         ]
+        .groupby("Wochentag")
+        .size()
+        .reindex(reihenfolge)
+        .fillna(0)
+        .reset_index(name="Zutritte")
     )
-    .properties(height=280)
-)
+    loans_tag = (
+        df_loans_open[
+            (df_loans_open["Jahr"] == woche_row["Jahr"])
+            & (df_loans_open["Kalenderwoche"] == woche_row["Kalenderwoche"])
+        ]
+        .assign(Wochentag=lambda df: df["Ausleihdatum"].dt.day_name(locale="de_CH"))
+        .groupby("Wochentag")
+        .size()
+        .reindex(reihenfolge)
+        .fillna(0)
+        .reset_index(name="Ausleihen")
+        if not df_loans_open.empty
+        else pd.DataFrame({
+            "Wochentag": reihenfolge,
+            "Ausleihen": [0] * len(reihenfolge),
+        })
+    )
+    pro_tag = pro_tag.merge(
+        loans_tag,
+        on="Wochentag",
+        how="left",
+    )
+    pro_tag["Ausleihen"] = pro_tag["Ausleihen"].fillna(0).astype(int)
+    pro_tag_chart = pro_tag.melt(
+        id_vars=["Wochentag"],
+        value_vars=["Zutritte", "Ausleihen"],
+        var_name="Kennzahl",
+        value_name="Anzahl",
+    )
+    with col1:
+        st.markdown(f"**Verteilung {woche_row['Woche']}**")
 
-st.altair_chart(heatmap, use_container_width=False)
-stunden_tag = (
-    df_open
-    .groupby(["Stunde", "Wochentag"])
-    .size()
-    .reset_index(name="Zutritte")
-)
+        tages_chart = (
+            alt.Chart(pro_tag_chart)
+            .mark_bar()
+            .encode(
+                x=alt.X(
+                    "Wochentag:N",
+                    sort=reihenfolge,
+                    title="Wochentag",
+                ),
+                xOffset=alt.XOffset("Kennzahl:N"),
+                y=alt.Y(
+                    "Anzahl:Q",
+                    title="Anzahl",
+                ),
+                color=alt.Color(
+                    "Kennzahl:N",
+                    legend=alt.Legend(orient="bottom"),
+                ),
+                tooltip=[
+                    alt.Tooltip("Wochentag:N"),
+                    alt.Tooltip("Kennzahl:N"),
+                    alt.Tooltip("Anzahl:Q", title="Anzahl"),
+                ],
+            )
+            .properties(height=260)
+        )
 
+        st.altair_chart(tages_chart, use_container_width=True)
+
+
+# =====================================================
+steuerung_col1, steuerung_col2, steuerung_col3 = st.columns([1.8, 2.2, 1])
+
+with steuerung_col1:
+    darstellung_zutritte = st.radio(
+        "Kennzahl",
+        ["Gesamteintritte", "Durchschnitt", "% Anteil"],
+        horizontal=True,
+        key="openlibrary_zutritte_darstellung",
+    )
+
+with steuerung_col2:
+    ausgewaehlte_tage = st.pills(
+        "Wochentage",
+        reihenfolge,
+        selection_mode="multi",
+        default=reihenfolge,
+        key="openlibrary_wochentage_auswahl",
+    )
+
+with steuerung_col3:
+    gesamtlinie_anzeigen = st.toggle(
+        "Total über alle Wochentage anzeigen",
+        value=True,
+        key="openlibrary_stunden_gesamtlinie",
+    )
+
+if darstellung_zutritte == "% Anteil":
+    st.caption(
+        "Prozentwerte beziehen sich auf alle gefilterten Zutritte im angezeigten Bereich."
+    )
+
+# =====================================================
+tab_zutritte, tab_ausleihen = st.tabs(["🚪 Zutritte", "📚 Ausleihen der Zutrittskunden"])
+
+with tab_zutritte:
+    # ZUTRITTE NACH STUNDE
+    # =====================================================
+    
+    st.subheader("🕒 Zutritte nach Stunde")
+    
+    df_stunden_basis = df_open[
+        df_open["Wochentag"].isin(ausgewaehlte_tage)
+        & df_open["Stunde"].between(oeffnung_start, oeffnung_ende)
+    ].copy()
+    
+    stunden_index = pd.MultiIndex.from_product(
+        [stunden_range, ausgewaehlte_tage],
+        names=["Stunde", "Wochentag"],
+    )
+    
+    if ausgewaehlte_tage:
+        stunden = (
+            df_stunden_basis
+            .groupby(["Stunde", "Wochentag"])
+            .size()
+            .reindex(stunden_index, fill_value=0)
+            .reset_index(name="Zutritte")
+        )
+    else:
+        stunden = pd.DataFrame(columns=["Stunde", "Wochentag", "Zutritte"])
+    
+    stunden["Wochentag"] = pd.Categorical(
+        stunden["Wochentag"],
+        categories=reihenfolge,
+        ordered=True
+    )
+    stunden["Stunden_label"] = stunden["Stunde"].map(lambda x: f"{x:02d}-{x + 1:02d}")
+    stunden["Anzahl_Tage"] = stunden["Wochentag"].map(tage_anzahl).fillna(0).astype(int)
+    stunden["Avg_Zutritte_pro_Tag"] = np.where(
+        stunden["Anzahl_Tage"] > 0,
+        stunden["Zutritte"] / stunden["Anzahl_Tage"],
+        0,
+    ).round(1)
+    stunden_total = stunden["Zutritte"].sum()
+    stunden["Anteil_Prozent"] = np.where(
+        stunden_total > 0,
+        stunden["Zutritte"] / stunden_total * 100,
+        0,
+    ).round(1)
+    
+    tage_im_filter = int(tage_anzahl.reindex(ausgewaehlte_tage).fillna(0).sum())
+    stunden_gesamt = (
+        df_stunden_basis
+        .groupby("Stunde")
+        .size()
+        .reindex(stunden_range, fill_value=0)
+        .reset_index(name="Zutritte")
+    )
+    stunden_gesamt["Stunden_label"] = stunden_gesamt["Stunde"].map(
+        lambda x: f"{x:02d}-{x + 1:02d}"
+    )
+    stunden_gesamt["Anzahl_Tage"] = tage_im_filter
+    stunden_gesamt["Avg_Zutritte_pro_Tag"] = np.where(
+        tage_im_filter > 0,
+        stunden_gesamt["Zutritte"] / tage_im_filter,
+        0,
+    ).round(1)
+    stunden_gesamt_total = stunden_gesamt["Zutritte"].sum()
+    stunden_gesamt["Anteil_Prozent"] = np.where(
+        stunden_gesamt_total > 0,
+        stunden_gesamt["Zutritte"] / stunden_gesamt_total * 100,
+        0,
+    ).round(1)
+    stunden_gesamt["Serie"] = "Alle ausgewählten Tage"
+    
+    if darstellung_zutritte == "% Anteil":
+        y_field = "Anteil_Prozent"
+        y_title = "Anteil aller Zutritte (%)"
+        y_tooltip = alt.Tooltip(
+            "Anteil_Prozent:Q",
+            title="Anteil aller Zutritte (%)",
+            format=".1f",
+        )
+    elif darstellung_zutritte == "Durchschnitt":
+        y_field = "Avg_Zutritte_pro_Tag"
+        y_title = "Ø Zutritte je Stunde"
+        y_tooltip = alt.Tooltip(
+            "Avg_Zutritte_pro_Tag:Q",
+            title="Ø je Stunde",
+            format=".1f",
+        )
+    else:
+        y_field = "Zutritte"
+        y_title = "Gesamteintritte"
+        y_tooltip = alt.Tooltip("Zutritte:Q", title="Gesamteintritte")
+    
+    wochentag_bars = (
+        alt.Chart(stunden)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "Stunden_label:N",
+                sort=stunden_sort,
+                title="Zeitfenster"
+            ),
+            xOffset=alt.XOffset(
+                "Wochentag:N",
+                sort=reihenfolge
+            ),
+            y=alt.Y(
+                f"{y_field}:Q",
+                title=y_title
+            ),
+            color=alt.Color(
+                "Wochentag:N",
+                sort=reihenfolge,
+                legend=alt.Legend(orient="bottom")
+            ),
+            tooltip=[
+                alt.Tooltip("Wochentag:N"),
+                alt.Tooltip("Stunden_label:N", title="Zeitfenster"),
+                alt.Tooltip("Zutritte:Q", title="Zutritte total"),
+                alt.Tooltip("Anzahl_Tage:Q", title="Kalendertage"),
+                y_tooltip,
+            ]
+        )
+        .properties(height=320)
+    )
+    
+    gesamt_linie = (
+        alt.Chart(stunden_gesamt)
+        .mark_line(color="#111827", point=True, strokeWidth=3)
+        .encode(
+            x=alt.X(
+                "Stunden_label:N",
+                sort=stunden_sort,
+                title="Zeitfenster",
+            ),
+            y=alt.Y(
+                f"{y_field}:Q",
+                title="Gesamt",
+                axis=alt.Axis(orient="right"),
+            ),
+            tooltip=[
+                alt.Tooltip("Serie:N"),
+                alt.Tooltip("Stunden_label:N", title="Zeitfenster"),
+                alt.Tooltip("Zutritte:Q", title="Zutritte total"),
+                alt.Tooltip("Anzahl_Tage:Q", title="Kalendertage"),
+                y_tooltip,
+            ],
+        )
+    )
+    
+    chart = (
+        alt.layer(
+            wochentag_bars,
+            gesamt_linie,
+        ).resolve_scale(y="independent")
+        if gesamtlinie_anzeigen
+        else wochentag_bars
+    )
+    
+    st.altair_chart(chart, use_container_width=True)
+    
+
+with tab_ausleihen:
+    st.subheader("📚 Ausleihen nach Stunde")
+    
+    df_ausleihen_stunden_basis = (
+        df_loans_open[
+            df_loans_open["Wochentag"].isin(ausgewaehlte_tage)
+            & df_loans_open["Stunde"].between(oeffnung_start, oeffnung_ende)
+        ].copy()
+        if not df_loans_open.empty and "Stunde" in df_loans_open.columns
+        else pd.DataFrame()
+    )
+    
+    if df_ausleihen_stunden_basis.empty:
+        st.info("Für die gewählten Filter sind keine Ausleihen der Zutrittskunden vorhanden.")
+    else:
+        ausleihen_stunden_index = pd.MultiIndex.from_product(
+            [stunden_range, ausgewaehlte_tage],
+            names=["Stunde", "Wochentag"],
+        )
+    
+        ausleihen_stunden = (
+            df_ausleihen_stunden_basis
+            .groupby(["Stunde", "Wochentag"])
+            .size()
+            .reindex(ausleihen_stunden_index, fill_value=0)
+            .reset_index(name="Ausleihen")
+        )
+        ausleihen_stunden["Wochentag"] = pd.Categorical(
+            ausleihen_stunden["Wochentag"],
+            categories=reihenfolge,
+            ordered=True,
+        )
+        ausleihen_stunden["Stunden_label"] = ausleihen_stunden["Stunde"].map(
+            lambda x: f"{x:02d}-{x + 1:02d}"
+        )
+        ausleihen_stunden["Anzahl_Tage"] = (
+            ausleihen_stunden["Wochentag"]
+            .map(tage_anzahl)
+            .fillna(0)
+            .astype(int)
+        )
+        ausleihen_stunden["Avg_Ausleihen_pro_Tag"] = np.where(
+            ausleihen_stunden["Anzahl_Tage"] > 0,
+            ausleihen_stunden["Ausleihen"] / ausleihen_stunden["Anzahl_Tage"],
+            0,
+        ).round(1)
+        ausleihen_stunden_total = ausleihen_stunden["Ausleihen"].sum()
+        ausleihen_stunden["Anteil_Prozent"] = np.where(
+            ausleihen_stunden_total > 0,
+            ausleihen_stunden["Ausleihen"] / ausleihen_stunden_total * 100,
+            0,
+        ).round(1)
+    
+        ausleihen_gesamt = (
+            df_ausleihen_stunden_basis
+            .groupby("Stunde")
+            .size()
+            .reindex(stunden_range, fill_value=0)
+            .reset_index(name="Ausleihen")
+        )
+        ausleihen_gesamt["Stunden_label"] = ausleihen_gesamt["Stunde"].map(
+            lambda x: f"{x:02d}-{x + 1:02d}"
+        )
+        ausleihen_gesamt["Anzahl_Tage"] = tage_im_filter
+        ausleihen_gesamt["Avg_Ausleihen_pro_Tag"] = np.where(
+            tage_im_filter > 0,
+            ausleihen_gesamt["Ausleihen"] / tage_im_filter,
+            0,
+        ).round(1)
+        ausleihen_gesamt_total = ausleihen_gesamt["Ausleihen"].sum()
+        ausleihen_gesamt["Anteil_Prozent"] = np.where(
+            ausleihen_gesamt_total > 0,
+            ausleihen_gesamt["Ausleihen"] / ausleihen_gesamt_total * 100,
+            0,
+        ).round(1)
+        ausleihen_gesamt["Serie"] = "Alle ausgewählten Tage"
+    
+        if darstellung_zutritte == "% Anteil":
+            ausleihen_y_field = "Anteil_Prozent"
+            ausleihen_y_title = "Anteil aller Ausleihen (%)"
+            ausleihen_y_tooltip = alt.Tooltip(
+                "Anteil_Prozent:Q",
+                title="Anteil aller Ausleihen (%)",
+                format=".1f",
+            )
+        elif darstellung_zutritte == "Durchschnitt":
+            ausleihen_y_field = "Avg_Ausleihen_pro_Tag"
+            ausleihen_y_title = "Ø Ausleihen je Stunde"
+            ausleihen_y_tooltip = alt.Tooltip(
+                "Avg_Ausleihen_pro_Tag:Q",
+                title="Ø je Stunde",
+                format=".1f",
+            )
+        else:
+            ausleihen_y_field = "Ausleihen"
+            ausleihen_y_title = "Gesamtausleihen"
+            ausleihen_y_tooltip = alt.Tooltip("Ausleihen:Q", title="Gesamtausleihen")
+    
+        ausleihen_bars = (
+            alt.Chart(ausleihen_stunden)
+            .mark_bar()
+            .encode(
+                x=alt.X(
+                    "Stunden_label:N",
+                    sort=stunden_sort,
+                    title="Zeitfenster",
+                ),
+                xOffset=alt.XOffset(
+                    "Wochentag:N",
+                    sort=reihenfolge,
+                ),
+                y=alt.Y(
+                    f"{ausleihen_y_field}:Q",
+                    title=ausleihen_y_title,
+                ),
+                color=alt.Color(
+                    "Wochentag:N",
+                    sort=reihenfolge,
+                    legend=alt.Legend(orient="bottom"),
+                ),
+                tooltip=[
+                    alt.Tooltip("Wochentag:N"),
+                    alt.Tooltip("Stunden_label:N", title="Zeitfenster"),
+                    alt.Tooltip("Ausleihen:Q", title="Ausleihen total"),
+                    alt.Tooltip("Anzahl_Tage:Q", title="Kalendertage"),
+                    ausleihen_y_tooltip,
+                ],
+            )
+            .properties(height=300)
+        )
+    
+        ausleihen_linie = (
+            alt.Chart(ausleihen_gesamt)
+            .mark_line(color="#111827", point=True, strokeWidth=3)
+            .encode(
+                x=alt.X(
+                    "Stunden_label:N",
+                    sort=stunden_sort,
+                    title="Zeitfenster",
+                ),
+                y=alt.Y(
+                    f"{ausleihen_y_field}:Q",
+                    title="Gesamt",
+                    axis=alt.Axis(orient="right"),
+                ),
+                tooltip=[
+                    alt.Tooltip("Serie:N"),
+                    alt.Tooltip("Stunden_label:N", title="Zeitfenster"),
+                    alt.Tooltip("Ausleihen:Q", title="Ausleihen total"),
+                    alt.Tooltip("Anzahl_Tage:Q", title="Kalendertage"),
+                    ausleihen_y_tooltip,
+                ],
+            )
+        )
+    
+        ausleihen_chart = (
+            alt.layer(
+                ausleihen_bars,
+                ausleihen_linie,
+            ).resolve_scale(y="independent")
+            if gesamtlinie_anzeigen
+            else ausleihen_bars
+        )
+    
+        st.altair_chart(ausleihen_chart, use_container_width=True)
+    # =====================================================
+
+with tab_zutritte:
+    # ZUTRITTE NACH WOCHENTAG
+    # =====================================================
+    
+    st.subheader("📅 Zutritte nach Wochentag")
+    
+    
+    tage = (
+        df_open
+        .groupby("Wochentag")
+        .size()
+        .reindex(reihenfolge)
+        .fillna(0)
+        .reset_index(name="Zutritte")
+    )
+    
+    tage["Anzahl_Tage"] = tage["Wochentag"].map(tage_anzahl).fillna(0).astype(int)
+    tage["Avg_Zutritte_pro_Tag"] = np.where(
+        tage["Anzahl_Tage"] > 0,
+        tage["Zutritte"] / tage["Anzahl_Tage"],
+        0,
+    ).round(1)
+    tage_total = tage["Zutritte"].sum()
+    tage["Anteil_Prozent"] = np.where(
+        tage_total > 0,
+        tage["Zutritte"] / tage_total * 100,
+        0,
+    ).round(1)
+    
+    if darstellung_zutritte == "% Anteil":
+        tage_y_field = "Anteil_Prozent"
+        tage_y_title = "Anteil der Zutritte (%)"
+        tage_tooltip = alt.Tooltip("Anteil_Prozent:Q", title="Anteil (%)", format=".1f")
+        tage["Anzeige_Label"] = tage["Anteil_Prozent"].map(lambda x: f"{x:.1f}%")
+    elif darstellung_zutritte == "Durchschnitt":
+        tage_y_field = "Avg_Zutritte_pro_Tag"
+        tage_y_title = "Ø Zutritte / Tag"
+        tage_tooltip = alt.Tooltip(
+            "Avg_Zutritte_pro_Tag:Q",
+            title="Ø Zutritte / Tag",
+            format=".1f",
+        )
+        tage["Anzeige_Label"] = tage["Avg_Zutritte_pro_Tag"].map(lambda x: f"Ø {x:.1f}/Tag")
+    else:
+        tage_y_field = "Zutritte"
+        tage_y_title = "Gesamteintritte"
+        tage_tooltip = alt.Tooltip("Zutritte:Q", title="Gesamteintritte")
+        tage["Anzeige_Label"] = tage["Zutritte"].map(lambda x: f"{int(x)}")
+    
+    bars = (
+        alt.Chart(tage)
+        .mark_bar()
+        .encode(
+            x=alt.X(
+                "Wochentag:N",
+                sort=reihenfolge
+            ),
+            y=alt.Y(
+                f"{tage_y_field}:Q",
+                title=tage_y_title,
+            ),
+            tooltip=[
+                alt.Tooltip("Wochentag:N"),
+                alt.Tooltip("Zutritte:Q", title="Zutritte total"),
+                alt.Tooltip("Anzahl_Tage:Q", title="Kalendertage"),
+                tage_tooltip,
+            ]
+        )
+        .properties(height=300)
+    )
+    
+    labels = (
+        alt.Chart(tage)
+        .mark_text(
+            dy=-8,
+            color="#111827",
+            fontWeight="bold",
+        )
+        .encode(
+            x=alt.X(
+                "Wochentag:N",
+                sort=reihenfolge,
+            ),
+            y=f"{tage_y_field}:Q",
+            text="Anzeige_Label:N",
+        )
+    )
+    
+    chart = alt.layer(
+        bars,
+        labels,
+    )
+    
+    st.altair_chart(chart, use_container_width=True)
+    
+
+with tab_ausleihen:
+    st.subheader("📚 Ausleihen nach Wochentag")
+    
+    if df_loans_open.empty or "Wochentag" not in df_loans_open.columns:
+        st.info("Für die gewählten Filter sind keine Ausleihen der Zutrittskunden vorhanden.")
+    else:
+        ausleihen_tage = (
+            df_loans_open
+            .groupby("Wochentag")
+            .size()
+            .reindex(reihenfolge)
+            .fillna(0)
+            .reset_index(name="Ausleihen")
+        )
+        ausleihen_tage["Anzahl_Tage"] = (
+            ausleihen_tage["Wochentag"]
+            .map(tage_anzahl)
+            .fillna(0)
+            .astype(int)
+        )
+        ausleihen_tage["Avg_Ausleihen_pro_Tag"] = np.where(
+            ausleihen_tage["Anzahl_Tage"] > 0,
+            ausleihen_tage["Ausleihen"] / ausleihen_tage["Anzahl_Tage"],
+            0,
+        ).round(1)
+        ausleihen_tage_total = ausleihen_tage["Ausleihen"].sum()
+        ausleihen_tage["Anteil_Prozent"] = np.where(
+            ausleihen_tage_total > 0,
+            ausleihen_tage["Ausleihen"] / ausleihen_tage_total * 100,
+            0,
+        ).round(1)
+    
+        if darstellung_zutritte == "% Anteil":
+            ausleihen_tage_y_field = "Anteil_Prozent"
+            ausleihen_tage_y_title = "Anteil der Ausleihen (%)"
+            ausleihen_tage_tooltip = alt.Tooltip(
+                "Anteil_Prozent:Q",
+                title="Anteil (%)",
+                format=".1f",
+            )
+            ausleihen_tage["Anzeige_Label"] = ausleihen_tage["Anteil_Prozent"].map(
+                lambda x: f"{x:.1f}%"
+            )
+        elif darstellung_zutritte == "Durchschnitt":
+            ausleihen_tage_y_field = "Avg_Ausleihen_pro_Tag"
+            ausleihen_tage_y_title = "Ø Ausleihen / Tag"
+            ausleihen_tage_tooltip = alt.Tooltip(
+                "Avg_Ausleihen_pro_Tag:Q",
+                title="Ø Ausleihen / Tag",
+                format=".1f",
+            )
+            ausleihen_tage["Anzeige_Label"] = ausleihen_tage["Avg_Ausleihen_pro_Tag"].map(
+                lambda x: f"Ø {x:.1f}/Tag"
+            )
+        else:
+            ausleihen_tage_y_field = "Ausleihen"
+            ausleihen_tage_y_title = "Gesamtausleihen"
+            ausleihen_tage_tooltip = alt.Tooltip("Ausleihen:Q", title="Gesamtausleihen")
+            ausleihen_tage["Anzeige_Label"] = ausleihen_tage["Ausleihen"].map(
+                lambda x: f"{int(x)}"
+            )
+    
+        ausleihen_tage_bars = (
+            alt.Chart(ausleihen_tage)
+            .mark_bar()
+            .encode(
+                x=alt.X(
+                    "Wochentag:N",
+                    sort=reihenfolge,
+                ),
+                y=alt.Y(
+                    f"{ausleihen_tage_y_field}:Q",
+                    title=ausleihen_tage_y_title,
+                ),
+                tooltip=[
+                    alt.Tooltip("Wochentag:N"),
+                    alt.Tooltip("Ausleihen:Q", title="Ausleihen total"),
+                    alt.Tooltip("Anzahl_Tage:Q", title="Kalendertage"),
+                    ausleihen_tage_tooltip,
+                ],
+            )
+            .properties(height=300)
+        )
+    
+        ausleihen_tage_labels = (
+            alt.Chart(ausleihen_tage)
+            .mark_text(
+                dy=-8,
+                color="#111827",
+                fontWeight="bold",
+            )
+            .encode(
+                x=alt.X(
+                    "Wochentag:N",
+                    sort=reihenfolge,
+                ),
+                y=f"{ausleihen_tage_y_field}:Q",
+                text="Anzeige_Label:N",
+            )
+        )
+    
+        st.altair_chart(
+            alt.layer(
+                ausleihen_tage_bars,
+                ausleihen_tage_labels,
+            ),
+            use_container_width=True,
+        )
+    
+    
+    

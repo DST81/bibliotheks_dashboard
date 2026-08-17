@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
+from src.utils import normalize_media_id
 
 
 # =====================================================
@@ -117,6 +118,12 @@ def robustes_datum(series: pd.Series, formate) -> pd.Series:
 def berechne_bestand_scores(df_books_all: pd.DataFrame, df_loans_all: pd.DataFrame) -> pd.DataFrame:
 
     df_bestand = df_books_all.copy()
+    df_loans_all = df_loans_all.copy()
+
+    if "NR Zugang" in df_bestand.columns:
+        df_bestand["_NR Zugang Match"] = df_bestand["NR Zugang"].apply(normalize_media_id)
+    if "NR Zugang" in df_loans_all.columns:
+        df_loans_all["_NR Zugang Match"] = df_loans_all["NR Zugang"].apply(normalize_media_id)
 
     # --- Historische Ausleihen ---
     if "Ausleihen" in df_bestand.columns:
@@ -131,11 +138,11 @@ def berechne_bestand_scores(df_books_all: pd.DataFrame, df_loans_all: pd.DataFra
         # Sidebar-Filtern bleibt und im Cache wiederverwendet werden kann).
         ausleihen_count = (
             df_loans_all
-            .groupby("NR Zugang")
+            .groupby("_NR Zugang Match")
             .size()
             .reset_index(name="Anzahl_Ausleihen")
         )
-        df_bestand = df_bestand.merge(ausleihen_count, on="NR Zugang", how="left")
+        df_bestand = df_bestand.merge(ausleihen_count, on="_NR Zugang Match", how="left")
         df_bestand["Anzahl_Ausleihen"] = df_bestand["Anzahl_Ausleihen"].fillna(0).astype(int)
 
     # --- Letzte Ausleihe ---
@@ -161,12 +168,12 @@ def berechne_bestand_scores(df_books_all: pd.DataFrame, df_loans_all: pd.DataFra
 
     ausleihen_365 = (
         df_loans_all[df_loans_all["Ausleihdatum"] >= grenze_365]
-        .groupby("NR Zugang")
+        .groupby("_NR Zugang Match")
         .size()
         .reset_index(name="Ausleihen_365Tage")
     )
 
-    df_bestand = df_bestand.merge(ausleihen_365, on="NR Zugang", how="left")
+    df_bestand = df_bestand.merge(ausleihen_365, on="_NR Zugang Match", how="left")
     df_bestand["Ausleihen_365Tage"] = df_bestand["Ausleihen_365Tage"].fillna(0).astype(int)
 
     # --- Umlauf ---

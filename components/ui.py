@@ -6,9 +6,9 @@ def kpi_box(title, current, previous=None, previous_label="Vorjahr gesamt", suff
     if isinstance(previous, (int, float)):
         previous_text = f"{previous_label}: {previous:,}".replace(",", "'")
     elif previous is not None:
-        previous_text = str(previous)
+        previous_text = f"{previous_label}: {previous}"
     else:
-        previous_text = None    
+        previous_text = None
 
     if isinstance(current, int):
         current_text = f"{current:,}".replace(",", "'")
@@ -139,4 +139,147 @@ def show_media_detail(buch, farben):
                 f"Trend {buch.get('Score_Trend', '-')}"
                 f"</span>",
                 unsafe_allow_html=True
+            )
+def show_new_acquisition_detail(buch):
+    if buch is None:
+        st.info("👉 Wählen Sie zuerst ein Medium aus.")
+        return
+
+    st.divider()
+
+    with st.container(border=True):
+
+        col_bild, col_info = st.columns([1, 2.6], gap="medium")
+
+        # =========================
+        # COVER
+        # =========================
+        with col_bild:
+            cover_url = buch.get("URL_Cover", "")
+
+            if cover_url and str(cover_url).strip():
+                st.image(str(cover_url), width=170)
+            else:
+                st.markdown(
+                    "<div style='width:170px;height:230px;"
+                    "background:#f0f0f0;border-radius:8px;"
+                    "display:flex;align-items:center;justify-content:center;"
+                    "color:#999;font-size:0.85em;text-align:center;'>"
+                    "📕<br>Kein Cover</div>",
+                    unsafe_allow_html=True
+                )
+
+        # =========================
+        # INFORMATIONEN
+        # =========================
+        with col_info:
+
+            st.markdown(
+                f"#### {buch.get('Titel', '-')}"
+            )
+
+            autor = buch.get("Verfasser I(1)", "")
+
+            if autor and str(autor).strip():
+                st.markdown(
+                    f"<span style='color:#666;'>{autor}</span>",
+                    unsafe_allow_html=True
+                )
+
+            # Reihe
+            reihe = buch.get("Reihe(1)", "")
+            band = buch.get("Band", "")
+
+            if (
+                pd.notna(reihe)
+                and str(reihe).strip()
+            ):
+                reihe_text = str(reihe).strip()
+
+                if pd.notna(band) and str(band).strip():
+                    reihe_text += f" · Band {band}"
+
+                st.markdown(
+                    f"<span style='color:#888;'>"
+                    f"📚 {reihe_text}"
+                    f"</span>",
+                    unsafe_allow_html=True
+                )
+
+            st.write("")
+
+            # =========================
+            # METADATEN
+            # =========================
+
+            lieferant = buch.get("Lieferant", "-")
+            preis = buch.get("Preis", None)
+            aufnahme = buch.get("Datum der Aufnahme", None)
+            nr_zugang = buch.get("NR Zugang", "-")
+
+            if pd.notna(preis):
+                preis_text = f"CHF {float(preis):.2f}"
+            else:
+                preis_text = "-"
+
+            if pd.notna(aufnahme):
+                try:
+                    aufnahme_text = pd.Timestamp(
+                        aufnahme
+                    ).strftime("%d.%m.%Y")
+                except:
+                    aufnahme_text = str(aufnahme)
+            else:
+                aufnahme_text = "-"
+
+            st.markdown(
+                f"<span style='color:#888; font-size:0.85em;'>"
+                f"📦 <strong>Lieferant:</strong> {lieferant}"
+                f"&nbsp;&nbsp;·&nbsp;&nbsp;"
+                f"💰 <strong>Preis:</strong> {preis_text}"
+                f"&nbsp;&nbsp;·&nbsp;&nbsp;"
+                f"📅 <strong>Aufnahme:</strong> {aufnahme_text}"
+                f"</span>",
+                unsafe_allow_html=True
+            )
+
+            st.write("")
+
+            # =========================
+            # KENNZAHLEN
+            # =========================
+
+            m1, m2, m3, m4 = st.columns(4)
+
+            with m1:
+                st.metric(
+                    "Preis",
+                    preis_text
+                )
+
+            with m2:
+                st.metric(
+                    "Ausleihen",
+                    f"{int(buch.get('Ausleihen', 0))}"
+                )
+
+            with m3:
+                st.metric(
+                    "Ausleihen / Preis",
+                    (
+                        f"{float(buch.get('Ausleihen', 0)) / float(preis):.2f}"
+                        if pd.notna(preis) and float(preis) > 0
+                        else "-"
+                    )
+                )
+
+            with m4:
+                st.metric(
+                    "NR Zugang",
+                    str(nr_zugang)
+                )
+
+            st.caption(
+                "Die Ausleihzahl bezieht sich auf den aktuell "
+                "gefilterten Zeitraum."
             )

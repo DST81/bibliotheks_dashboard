@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from pathlib import Path
 import pandas as pd
@@ -6,13 +7,135 @@ import streamlit as st
 from datetime import datetime
 import unicodedata
 import geopandas as gpd
+from dotenv import load_dotenv
 
 DATA_DIR = Path("data/cache")
+LIBRARY_DATA_ROOT = Path("data/libraries")
 
-def get_latest_file(pattern_prefix):
-    if not DATA_DIR.exists():
+load_dotenv(override=True)
+
+
+def _env_flag(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "ja", "on"}
+
+
+def _sanitize_library_id(value):
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(value or "").strip())
+    return cleaned.strip("_") or "default"
+
+
+def _parse_library_keys():
+    """
+    Liest DASHBOARD_LIBRARY_KEYS aus .env.
+
+    Erwartete Form:
+    DASHBOARD_LIBRARY_KEYS=seengen=sehr_langer_key,musterhausen=anderer_key
+    """
+    raw = os.getenv("DASHBOARD_LIBRARY_KEYS", "").strip()
+    key_to_library = {}
+
+    if not raw:
+        return key_to_library
+
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            for library_id, access_key in parsed.items():
+                if access_key:
+                    key_to_library[str(access_key).strip()] = _sanitize_library_id(library_id)
+            return key_to_library
+    except json.JSONDecodeError:
+        pass
+
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        separator = "=" if "=" in item else ":"
+        if separator not in item:
+            continue
+        library_id, access_key = item.split(separator, 1)
+        library_id = _sanitize_library_id(library_id)
+        access_key = access_key.split(" #", 1)[0].strip()
+        if library_id and access_key:
+            key_to_library[access_key] = library_id
+
+    return key_to_library
+
+
+def get_library_context():
+    """
+    Bestimmt die aktive Bibliothek aus dem URL-Parameter access_key.
+    Ohne konfigurierte Keys bleibt der bisherige lokale data/cache-Modus aktiv.
+    """
+    query_access_key = st.query_params.get("access_key")
+    if isinstance(query_access_key, list):
+        query_access_key = query_access_key[0] if query_access_key else None
+    query_access_key = str(query_access_key).strip() if query_access_key else None
+
+    existing_context = st.session_state.get("library_context")
+    if (
+        existing_context
+        and existing_context.get("authenticated")
+        and not query_access_key
+    ):
+        return existing_context
+
+    key_to_library = _parse_library_keys()
+    require_access_key = _env_flag("DASHBOARD_REQUIRE_ACCESS_KEY", False)
+    default_library = _sanitize_library_id(
+        os.getenv("DASHBOARD_DEFAULT_LIBRARY_ID")
+        or os.getenv("FILEMAKER_DATABASE")
+        or "local"
+    )
+
+    authenticated = False
+    if key_to_library:
+        if query_access_key in key_to_library:
+            library_id = key_to_library[query_access_key]
+            authenticated = True
+        elif require_access_key:
+            st.error("Kein gueltiger Dashboard-Zugriff.")
+            st.stop()
+        else:
+            library_id = default_library
+    else:
+        if require_access_key:
+            st.error("Dashboard-Zugriff ist nicht konfiguriert.")
+            st.stop()
+        library_id = default_library
+
+    data_root = Path(os.getenv("DASHBOARD_LIBRARY_DATA_ROOT", str(LIBRARY_DATA_ROOT)))
+    cache_dir = data_root / library_id / "cache"
+
+    # Lokale Entwicklung: bestehende Installationen mit data/cache laufen weiter.
+    if not require_access_key and not cache_dir.exists() and DATA_DIR.exists():
+        cache_dir = DATA_DIR
+
+    context = {
+        "library_id": library_id,
+        "library_name": os.getenv(f"DASHBOARD_LIBRARY_NAME_{library_id.upper()}", library_id),
+        "cache_dir": cache_dir,
+        "authenticated": authenticated,
+        "_access_key": query_access_key,
+    }
+    st.session_state["library_context"] = context
+    return context
+
+
+def normalize_media_id(value):
+    if pd.isna(value):
+        return ""
+    return re.sub(r"\D+", "", str(value)).strip()
+
+def get_latest_file(pattern_prefix, data_dir=None):
+    data_dir = Path(data_dir) if data_dir else DATA_DIR
+    if not data_dir.exists():
         return None
-    files = list(DATA_DIR.glob(f"{pattern_prefix}*.json"))
+    files = list(data_dir.glob(f"{pattern_prefix}*.json"))
     if not files:
         return None
     def extract_date(filepath):
@@ -33,7 +156,8 @@ def get_file_metadata(filepath):
     metadata = {
         "file": filepath.name,
         "data_date": None,
-        "cached_at": None
+        "cached_at": None,
+        "status": "loaded",
     }
 
     # Datum aus Dateinamen
@@ -52,14 +176,79 @@ def get_file_metadata(filepath):
         pass
 
     return metadata
+
+
+def get_source_metadata(status, message=None, filepath=None):
+    metadata = {
+        "file": filepath.name if filepath else None,
+        "data_date": None,
+        "cached_at": None,
+        "status": status,
+    }
+    if message:
+        metadata["message"] = message
+    return metadata
 def parse_date(series):
     return pd.to_datetime(series, errors="coerce", format="%m/%d/%Y")
 
 def parse_datetime(series):
     return pd.to_datetime(series, errors="coerce", format="%m/%d/%Y %H:%M:%S")
 
-@st.cache_data(ttl=3600) # Cache für 1 Stunde
+
+def load_catalog_like_cache(pattern_prefix, data_dir=None):
+    cache_file = get_latest_file(pattern_prefix, data_dir)
+    if not cache_file:
+        return None, None
+
+    with open(cache_file, "r", encoding="utf-8") as f:
+        cache = json.load(f)
+
+    rows = []
+    for record in cache.get("records", []):
+        row = record.get("fieldData", {}).copy()
+
+        if "NR Zugang" in row:
+            rows.append(row)
+
+    if not rows:
+        return None, cache_file
+
+    df = pd.DataFrame(rows)
+    df["NR Zugang"] = (
+        df["NR Zugang"]
+        .astype(str)
+        .str.strip()
+    )
+    df["_NR Zugang Match"] = df["NR Zugang"].apply(normalize_media_id)
+    df = df[df["_NR Zugang Match"] != ""].copy()
+    df = df.drop_duplicates(subset="_NR Zugang Match")
+
+    return df, cache_file
+
+
+def load_generic_cache(pattern_prefix, data_dir=None):
+    cache_file = get_latest_file(pattern_prefix, data_dir)
+    if not cache_file:
+        return pd.DataFrame(), None
+
+    with open(cache_file, "r", encoding="utf-8") as f:
+        cache = json.load(f)
+
+    rows = []
+    for record in cache.get("records", []):
+        row = record.get("fieldData", {}).copy()
+        row["recordId"] = record.get("recordId")
+        rows.append(row)
+
+    return pd.DataFrame(rows), cache_file
+
 def load_data():
+    context = get_library_context()
+    return _load_data_cached(str(context["cache_dir"]), context["library_id"])
+
+
+@st.cache_data(ttl=3600) # Cache für 1 Stunde
+def _load_data_cached(cache_dir, library_id):
     """
     Lädt alle Datenquellen.
 
@@ -73,18 +262,26 @@ def load_data():
     }
     """
     
+    cache_dir = Path(cache_dir)
+
     # 1. Ergebnis-Dictionary initialisieren
     result = {
-        "loans": None,
-        "catalog": None,
-        "users": None,
-        "smartlibrary": None,
-        "metadata": {}
+        "loans": pd.DataFrame(),
+        "catalog": pd.DataFrame(),
+        "antiquariat": pd.DataFrame(),
+        "users": pd.DataFrame(),
+        "smartlibrary": pd.DataFrame(),
+        "preferences": pd.DataFrame(),
+        "metadata": {},
+        "library": {
+            "id": library_id,
+            "cache_dir": str(cache_dir),
+        },
     }
 
 
     # --- 3. Ausleihdaten laden ---
-    ausleihe_file = get_latest_file("Ausleihe_Liste_")
+    ausleihe_file = get_latest_file("Ausleihe_Liste_", cache_dir)
     if ausleihe_file:
         # WICHTIG: Datum extrahieren und speichern
         result["metadata"]["loans"] = get_file_metadata(ausleihe_file)
@@ -106,6 +303,11 @@ def load_data():
             for col in date_columns:
                 if col in df_loans.columns:
                     df_loans[col] = parse_date(df_loans[col])
+
+            datetime_columns = ["geändert", "geaendert", "Geändert"]
+            for col in datetime_columns:
+                if col in df_loans.columns:
+                    df_loans[col] = parse_datetime(df_loans[col])
             
             # Numerische Felder
             numeric_columns = ["Verlängerung_Anz", "Anz_Exemplare", "Stat_Ausl_inkl_Verl"]
@@ -115,92 +317,84 @@ def load_data():
             
             result["loans"] = df_loans
         except Exception as e:
-            st.error(f"Fehler beim Laden der Ausleihdaten: {e}")
+            result["metadata"]["loans"] = get_source_metadata("error", f"Fehler beim Laden der Ausleihdaten: {e}", ausleihe_file)
+            result["loans"] = pd.DataFrame()
     else:
-        st.warning("Keine Ausleih-Daten gefunden.")
+        result["metadata"]["loans"] = get_source_metadata("missing", "Keine Ausleih-Datei im Cache gefunden.")
 
     # --- 4. Katalogdaten laden ---
-    katalog_file = get_latest_file("Katalogisieren_")
-    if katalog_file:
-        result["metadata"]["catalog"] = get_file_metadata(katalog_file)
-        try:
-            with open(katalog_file, "r", encoding="utf-8") as f:
-                cache_kat = json.load(f)
+    try:
+        df_catalog, katalog_file = load_catalog_like_cache("Katalogisieren_", cache_dir)
+        if katalog_file:
+            result["metadata"]["catalog"] = get_file_metadata(katalog_file)
+            result["catalog"] = df_catalog if df_catalog is not None else pd.DataFrame()
+            if df_catalog is None or df_catalog.empty:
+                result["metadata"]["catalog"]["status"] = "empty"
+                result["metadata"]["catalog"]["message"] = "Katalogdatei gefunden, aber keine Datensaetze enthalten."
+        else:
+            result["metadata"]["catalog"] = get_source_metadata("missing", "Keine Katalog-Datei im Cache gefunden.")
+    except Exception as e:
+        result["metadata"]["catalog"] = get_source_metadata("error", f"Fehler beim Laden der Katalogdaten: {e}")
+        result["catalog"] = pd.DataFrame()
 
-            kat_records = cache_kat.get("records", [])
-            kat_rows = []
-
-            for record in kat_records:
-                row = record.get("fieldData", {}).copy()
-
-                if "NR Zugang" in row:
-                    kat_rows.append(row)
-
-            if kat_rows:
-                df_catalog = pd.DataFrame(kat_rows)
-
-                # Schlüssel bereinigen
-                df_catalog["NR Zugang"] = (
-                    df_catalog["NR Zugang"]
-                    .astype(str)
-                    .str.strip()
-                )
-
-                # Ein Medium = ein Katalogeintrag
-                df_catalog = df_catalog.drop_duplicates(
-                    subset="NR Zugang"
-                )
-
-            else:
-                df_catalog = None
-
-            result["catalog"] = df_catalog
-        except Exception as e:
-            st.warning(f"Fehler beim Laden der Katalogdaten: {e}")
+    # --- 4b. Antiquariat laden (ausgeschiedene Medien fuer historische Ausleihen) ---
+    try:
+        df_antiquariat, antiquariat_file = load_catalog_like_cache("Antiquariat_", cache_dir)
+        if antiquariat_file:
+            result["metadata"]["antiquariat"] = get_file_metadata(antiquariat_file)
+            result["antiquariat"] = df_antiquariat if df_antiquariat is not None else pd.DataFrame()
+            if df_antiquariat is None or df_antiquariat.empty:
+                result["metadata"]["antiquariat"]["status"] = "empty"
+                result["metadata"]["antiquariat"]["message"] = "Antiquariatsdatei gefunden, aber keine Datensaetze enthalten."
+        else:
+            result["metadata"]["antiquariat"] = get_source_metadata("missing", "Keine Antiquariat-Datei im Cache gefunden.")
+    except Exception as e:
+        result["metadata"]["antiquariat"] = get_source_metadata("error", f"Fehler beim Laden der Antiquariatsdaten: {e}")
+        result["antiquariat"] = pd.DataFrame()
 
     # --- 5. Nutzerdaten laden ---
-    nutzer_file = get_latest_file("Benutzer_Dashboard_") 
-    
+    nutzer_file = get_latest_file("Benutzer_Dashboard_", cache_dir)
+
     if nutzer_file:
         result["metadata"]["users"] = get_file_metadata(nutzer_file)
         try:
             with open(nutzer_file, "r", encoding="utf-8") as f:
                 cache_users = json.load(f)
-            user_records = cache_users.get("records", [])
-            user_rows = []
-            for record in user_records:
-                row = record.get("fieldData", {}).copy()
-                user_rows.append(row)
-            
+
+            user_rows = [
+                record.get("fieldData", {}).copy()
+                for record in cache_users.get("records", [])
+            ]
+
             if user_rows:
                 df_users = pd.DataFrame(user_rows)
-                
+
                 if "Benutzergruppe" in df_users.columns:
                     df_users["Benutzergruppe"] = df_users["Benutzergruppe"].astype(str).str.strip()
                 if "Wohnort" in df_users.columns:
                     df_users["Wohnort"] = df_users["Wohnort"].astype(str).str.strip()
-                    
+
                 result["users"] = df_users
             else:
-                st.warning("Nutzerdatei gefunden, aber keine Datensätze enthalten.")
+                result["metadata"]["users"]["status"] = "empty"
+                result["metadata"]["users"]["message"] = "Nutzerdatei gefunden, aber keine Datensaetze enthalten."
+                result["users"] = pd.DataFrame()
         except Exception as e:
-            st.error(f"Fehler beim Laden der Nutzerdaten: {e}")
+            result["metadata"]["users"] = get_source_metadata("error", f"Fehler beim Laden der Nutzerdaten: {e}", nutzer_file)
+            result["users"] = pd.DataFrame()
     else:
-        st.warning("Keine Nutzer-Daten gefunden.")
+        result["metadata"]["users"] = get_source_metadata("missing", "Keine Nutzer-Datei im Cache gefunden.")
     # --- 6. SmartLibrary-Protokoll laden ---
-    smartlibrary_file = get_latest_file("SmartLibraryProtokoll_")
+    smartlibrary_file = get_latest_file("SmartLibraryProtokoll_", cache_dir)
 
     if smartlibrary_file:
         result["metadata"]["smartlibrary"] = get_file_metadata(smartlibrary_file)
-
         try:
             with open(smartlibrary_file, "r", encoding="utf-8") as f:
                 cache = json.load(f)
 
-            records = cache.get("records", [])
             rows = []
-
-            for record in records:
+            for record in cache.get("records", []):
                 row = record.get("fieldData", {}).copy()
                 row["recordId"] = record.get("recordId")
                 rows.append(row)
@@ -208,113 +402,75 @@ def load_data():
             if rows:
                 df_smartlibrary = pd.DataFrame(rows)
 
-                # Datumsfelder
                 if "erstellt" in df_smartlibrary.columns:
-                    df_smartlibrary["erstellt"] = parse_datetime(
-                        df_smartlibrary["erstellt"]
-                    )
+                    df_smartlibrary["erstellt"] = parse_datetime(df_smartlibrary["erstellt"])
 
-                # Nummer als String
                 if "Nummer" in df_smartlibrary.columns:
-                    df_smartlibrary["Nummer"] = (
-                        df_smartlibrary["Nummer"]
-                        .astype(str)
-                        .str.strip()
-                    )
+                    df_smartlibrary["Nummer"] = df_smartlibrary["Nummer"].astype(str).str.strip()
 
                 result["smartlibrary"] = df_smartlibrary
-
             else:
-                st.warning("SmartLibrary-Datei gefunden, aber keine Datensätze enthalten.")
-
+                result["metadata"]["smartlibrary"]["status"] = "empty"
+                result["metadata"]["smartlibrary"]["message"] = "SmartLibrary-Datei gefunden, aber keine Datensaetze enthalten."
+                result["smartlibrary"] = pd.DataFrame()
         except Exception as e:
-            st.error(f"Fehler beim Laden der SmartLibrary-Daten: {e}")
-
+            result["metadata"]["smartlibrary"] = get_source_metadata("error", f"Fehler beim Laden der SmartLibrary-Daten: {e}", smartlibrary_file)
+            result["smartlibrary"] = pd.DataFrame()
     else:
-        st.warning("Keine SmartLibrary-Daten gefunden.")
+        result["metadata"]["smartlibrary"] = get_source_metadata("missing", "Keine SmartLibrary-Datei im Cache gefunden.")
+
+    # --- 6b. Voreinstellungen laden (z.B. bediente Oeffnungszeiten pro Zweigstelle) ---
+    try:
+        df_preferences, preferences_file = load_generic_cache("Voreinstellungen_", cache_dir)
+        if preferences_file:
+            result["metadata"]["preferences"] = get_file_metadata(preferences_file)
+            result["preferences"] = df_preferences
+            if df_preferences.empty:
+                result["metadata"]["preferences"]["status"] = "empty"
+                result["metadata"]["preferences"]["message"] = "Voreinstellungen-Datei gefunden, aber keine Datensaetze enthalten."
+        else:
+            result["metadata"]["preferences"] = get_source_metadata("missing", "Keine Voreinstellungen-Datei im Cache gefunden.")
+    except Exception as e:
+        result["metadata"]["preferences"] = get_source_metadata("error", f"Fehler beim Laden der Voreinstellungen: {e}")
+        result["preferences"] = pd.DataFrame()
 
     # --- 7. Join von Ausleihe und Katalog ---
-    if result["loans"] is not None and result["catalog"] is not None:
+    catalog_sources = [
+        df for df in [result["catalog"], result["antiquariat"]]
+        if df is not None and not df.empty
+    ]
+
+    if result["loans"] is not None and catalog_sources:
         df_loans = result["loans"]
-        df_catalog = result["catalog"]
+        df_catalog = (
+            pd.concat(catalog_sources, ignore_index=True)
+            .drop_duplicates(subset="_NR Zugang Match", keep="first")
+        )
         
         id_col = "NR Zugang"
         if id_col in df_loans.columns:
             df_loans[id_col] = df_loans[id_col].astype(str).str.strip()
-            result["loans"] = df_loans.merge(
+            df_loans["_NR Zugang Match"] = df_loans[id_col].apply(normalize_media_id)
+            df_joined = (
+                df_loans.merge(
                 df_catalog, 
-                on=id_col, 
+                on="_NR Zugang Match", 
                 how="left",
                 suffixes=("_loan", "_catalog"))
+                .drop(columns=["_NR Zugang Match"])
+            )
+
+            if "NR Zugang_loan" in df_joined.columns:
+                df_joined["NR Zugang"] = df_joined["NR Zugang_loan"]
+                df_joined = df_joined.drop(columns=["NR Zugang_loan"])
+
+            if "NR Zugang_catalog" in df_joined.columns:
+                df_joined = df_joined.drop(columns=["NR Zugang_catalog"])
+
+            result["loans"] = df_joined
             
 
     return result
-
-# ---------------------------------------------------------
-# HIER MUSS DIE FUNKTION STEHEN
-# ---------------------------------------------------------
-def apply_config(df, config):
-    """
-    Wendet Mapping-Regeln aus der config.json auf den DataFrame an.
-    Erstellt eine neue Spalte 'Benutzergruppe_Gruppiert'.
-    """
-    # Wenn keine Daten oder keine Config, nichts tun
-    if df is None or df.empty or not config:
-        return df
-    
-    df_work = df.copy()
-    
-    # 1. Benutzergruppen mappen
-    # Prüfen ob Mapping-Regeln existieren UND die Spalte "Benutzergruppe" da ist
-    if "group_mapping" in config and config["group_mapping"] and "Benutzergruppe" in df_work.columns:
-        mapping_rules = config["group_mapping"]
-        
-        def map_group(val):
-            if pd.isna(val):
-                return "Unbekannt" # Oder pd.NA, je nach Wunsch
-            val_str = str(val).strip()
-            # Prüfen ob der Wert in einer der Listen vorkommt
-            for new_name, source_list in mapping_rules.items():
-                if val_str in source_list:
-                    return new_name
-            return val_str # Wenn nicht gemappt, bleibt der alte Name stehen
-            
-        # WICHTIG: Hier wird eine NEUE Spalte erstellt, nicht die alte überschrieben!
-        df_work["Benutzergruppe_Gruppiert"] = df_work["Benutzergruppe"].apply(map_group)
-
-    return df_work
-
-
-
-
-
-def apply_group_mapping(df, config):
-    """
-    Wendet das group_mapping aus der Config auf den DataFrame an.
-    Erstellt eine neue Spalte 'Benutzergruppe_Gruppiert'.
-    """
-    group_mapping = config.get("group_mapping", {})
-    
-    if not group_mapping:
-        return df
-
-    # Kopie des DataFrames erstellen, um SettingWithCopyWarning zu vermeiden
-    df_mapped = df.copy()
-    
-    # Ziel-Spalte initialisieren (z.B. mit dem Originalwert oder 'Unbekannt')
-    # Wir nehmen hier den Originalwert als Fallback
-    df_mapped['Benutzergruppe_Gruppiert'] = df_mapped['Benutzergruppe']
-
-    # Durch das Mapping iterieren
-    # Struktur: { "Zielgruppe": ["Original A", "Original B"], ... }
-    for target_group, source_values in group_mapping.items():
-        # Maske erstellen: Wo ist die Benutergruppe in der Liste der source_values?
-        mask = df_mapped['Benutzergruppe'].isin(source_values)
-        # Werte überschreiben
-        df_mapped.loc[mask, 'Benutzergruppe_Gruppiert'] = target_group
-
-    return df_mapped
-
 
 def normalize_text(text):
     """

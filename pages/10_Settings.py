@@ -1,184 +1,164 @@
-import streamlit as st
 import json
-import pandas as pd
 from pathlib import Path
-from src.utils import load_data
+
+import streamlit as st
+
 
 st.set_page_config(page_title="Einstellungen", page_icon="⚙️", layout="wide")
-st.title("⚙️ Dashboard Einstellungen & Daten-Mapping")
-
-st.markdown("""
-Hier können Sie das Dashboard an die spezifischen Bedürfnisse Ihrer Bibliothek anpassen.
-Die Einstellungen werden lokal in einer `config.json` gespeichert und beim nächsten Laden automatisch angewendet.
-""")
+st.title("⚙️ Einstellungen")
+col1,col2 = st.columns([7,1])
+with col1:
+    
+    st.caption("Ferien und Saisonzeiten für Auswertungen mit Kalenderwochen pflegen.")
 
 CONFIG_FILE = Path("data/config.json")
 
-# --- 1. Konfiguration laden oder Standard erstellen ---
-default_config = {
-    "filters": {
-        "visible": ["Zweigstelle", "Medienart", "Benutzergruppe", "Kategorie Alter"],
-        "defaults": {}
-    },
-    "group_mapping": {},
-    "custom_replacements": {}
-}
 
-# Laden wenn vorhanden
-if CONFIG_FILE.exists():
+def load_config():
+    if not CONFIG_FILE.exists():
+        return {"ferien": []}
+
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             config = json.load(f)
     except Exception as e:
         st.error(f"Fehler beim Lesen der Config: {e}")
-        config = default_config
-else:
-    config = default_config
+        return {"ferien": []}
 
-# sicherstellen, dass Struktur existiert
-config.setdefault("filters", {})
-config["filters"].setdefault("visible", default_config["filters"]["visible"])
-config["filters"].setdefault("defaults", {})
-config.setdefault("group_mapping", {})
-config.setdefault("custom_replacements", {})
+    return {
+        "ferien": config.get("ferien", []),
+        "openlibrary": config.get("openlibrary", {}),
+    }
 
 
-# Prüfen, ob Daten geladen wurden
-if 'data' not in st.session_state or st.session_state['data'] is None:
-    st.error("Keine Daten geladen. Bitte starten Sie das Dashboard über die [Startseite](../app.py).")
-    st.stop()
+def save_config(config):
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
 
-data = st.session_state['data']
-df_users = data.get("users")
-df_ausleihe = data.get("loans") 
-df_katalog = data.get('catalog')
 
-if df_users is None:
-    st.warning("Keine Nutzerdaten verfügbar.")
-    st.stop()
-available_groups = []
-all_columns = []
+config = load_config()
+ferien = config.setdefault("ferien", [])
+openlibrary = config.setdefault("openlibrary", {})
+openlibrary.setdefault("start_stunde", 6)
+openlibrary.setdefault("end_stunde", 23)
+with col2:
+    if st.button("Einstellungen speichern", type="primary"):
+        save_config(config)
+        st.success("Einstellungen gespeichert.")
 
-if df_ausleihe is not None and not df_ausleihe.empty:
-    if "Benutzergruppe" in df_ausleihe.columns:
-        available_groups = sorted(df_ausleihe["Benutzergruppe"].dropna().unique().astype(str).tolist())
-    # Spalten mit wenigen einzigartigen Werten eignen sich gut als Filter
-    all_columns = [col for col in df_ausleihe.columns if df_ausleihe[col].nunique() < 50 and col not in ["Ausleihdatum", "Rückgabedatum", "recordId", "modId"]]
+with st.expander("OpenLibrary-Öffnungszeiten"):
+    title,ol_col1, ol_col2 = st.columns([2,1,1])
+    with title:
+        #st.subheader("OpenLibrary-Öffnungszeiten")
+        st.caption("Diese Stunden werden für die OpenLibrary-Auswertungen nach Stunde verwendet.")
 
-# --- 2. Benutzergruppen zusammenfassen (Mapping) ---
 
-with st.expander("1. Benutzergruppen zusammenfassen"):
-    st.info("Fassen Sie mehrere technische Gruppen zu einer logischen Gruppe zusammen. Änderungen werden sofort gespeichert.")
-
-    col_input, col_action, col_list = st.columns([2, 1, 3])
-
-    with col_input:
-        new_group_name = st.text_input("Name der neuen Sammelgruppe", placeholder="z.B. Kinder & Jugendliche", key="input_name")
-        source_groups = st.multiselect(
-            "Quell-Gruppen auswählen",
-            options=available_groups,
-            help="Halten Sie Strg/Cmd gedrückt, um mehrere zu wählen.",
-            key="input_sources"
+    with ol_col1:
+        openlibrary["start_stunde"] = st.number_input(
+            "Startstunde",
+            min_value=0,
+            max_value=23,
+            value=int(openlibrary.get("start_stunde", 6)),
+            step=1,
         )
 
-    with col_action:
-        st.write("")
-        st.write("")
-        # WICHTIG: Wir speichern hier sofort!
-        if st.button("➕ Hinzufügen", type="primary", use_container_width=True):
-            if not new_group_name or not source_groups:
-                st.error("Bitte Name und Gruppen auswählen.")
-            elif new_group_name in config["group_mapping"]:
-                st.warning(f"Gruppe '{new_group_name}' existiert bereits.")
+
+    with ol_col2:
+        openlibrary["end_stunde"] = st.number_input(
+            "Endstunde",
+            min_value=int(openlibrary["start_stunde"]),
+            max_value=23,
+            value=max(
+                int(openlibrary.get("end_stunde", 23)),
+                int(openlibrary["start_stunde"]),
+            ),
+            step=1,
+        )
+        st.caption(
+            f"Angezeigt werden Zeitfenster von {int(openlibrary['start_stunde']):02d}:00 "
+            f"bis {int(openlibrary['end_stunde']) + 1:02d}:00."
+        )
+with st.expander("Ferien / Saisonzeiten"):
+    st.markdown("### Neue Ferien hinzufügen")
+
+    c1, c2, c3, c4, c5 = st.columns([3, 1, 1, 1, 1])
+
+    with c1:
+        neuer_name = st.text_input("Name")
+
+    with c2:
+        neuer_start = st.number_input("Start-KW", 1, 53, 1)
+
+    with c3:
+        neues_ende = st.number_input("End-KW", 1, 53, 1)
+
+    with c4:
+        neue_farbe = st.color_picker("Farbe", "#B4F0FF")
+
+    with c5:
+        if st.button("➕ Ferien hinzufügen"):
+            if neuer_name.strip():
+                ferien.append({
+                    "name": neuer_name.strip(),
+                    "start_kw": int(neuer_start),
+                    "end_kw": int(neues_ende),
+                    "farbe": neue_farbe,
+                    "aktiv": True,
+                })
+                save_config(config)
+                st.success("Ferien gespeichert.")
+                st.rerun()
             else:
-                # 1. Zur Variable hinzufügen
-                config["group_mapping"][new_group_name] = source_groups
-                
-                # 2. SOFORT in die Datei schreiben (Auto-Save)
-                try:
-                    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-                    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                        json.dump(config, f, ensure_ascii=False, indent=2)
-                    
-                    st.success(f"✅ Gruppe '{new_group_name}' erstellt und gespeichert!")
-                    st.rerun() # Neu laden, damit die Liste und die Variable aktualisiert werden
-                except Exception as e:
-                    st.error(f"❌ Fehler beim Speichern: {e}")
+                st.error("Bitte eine Bezeichnung eingeben.")
 
-    with col_list:
-        st.write("**Aktive Mapping-Regeln:**")
-        if config["group_mapping"]:
-            for name, sources in config["group_mapping"].items():
-                with st.container(border=True):
-                    c1, c2 = st.columns([3, 1])
-                    c1.markdown(f"**{name}**")
-                    c1.caption(f"Enthält: {', '.join(sources)}")
-                    # Auch beim Löschen sofort speichern
-                    if c2.button("Löschen", key=f"del_{name}", use_container_width=True):
-                        del config["group_mapping"][name]
-                        try:
-                            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                                json.dump(config, f, ensure_ascii=False, indent=2)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Fehler beim Löschen: {e}")
-        else:
-            st.caption("Keine Regeln definiert.")
-
-
-ferien = config.get("ferien", [])
-with st.expander("2. Ferien / Saisonzeiten"):
+    st.subheader("Ferien / Saisonzeiten")
     st.caption(
-        "Diese Zeiträume können später in Diagrammen "
-        "als farbige Bereiche angezeigt werden."
+        "Diese Zeiträume können in Diagrammen als farbige Bereiche angezeigt werden."
     )
-    # -----------------------------
-    # Vorhandene Ferien bearbeiten
-    # -----------------------------
 
     delete_index = None
 
     for i, eintrag in enumerate(ferien):
-
-        c1, c2, c3, c4, c5, c6 = st.columns([3,1,1,1,1,0.8])
+        c1, c2, c3, c4, c5, c6 = st.columns([3, 1, 1, 1, 0.5, 0.5])
 
         with c1:
             ferien[i]["name"] = st.text_input(
                 "Bezeichnung",
-                value=eintrag["name"],
-                key=f"name_{i}"
+                value=eintrag.get("name", ""),
+                key=f"name_{i}",
             )
 
         with c2:
             ferien[i]["start_kw"] = st.number_input(
-                "Start",
+                "Start-KW",
                 1,
                 53,
-                value=int(eintrag["start_kw"]),
-                key=f"start_{i}"
+                value=int(eintrag.get("start_kw", 1)),
+                key=f"start_{i}",
             )
 
         with c3:
             ferien[i]["end_kw"] = st.number_input(
-                "Ende",
+                "End-KW",
                 1,
                 53,
-                value=int(eintrag["end_kw"]),
-                key=f"ende_{i}"
+                value=int(eintrag.get("end_kw", 1)),
+                key=f"ende_{i}",
             )
 
         with c4:
             ferien[i]["farbe"] = st.color_picker(
                 "Farbe",
                 value=eintrag.get("farbe", "#B4F0FF"),
-                key=f"farbe_{i}"
+                key=f"farbe_{i}",
             )
 
         with c5:
             ferien[i]["aktiv"] = st.checkbox(
                 "Aktiv",
                 value=eintrag.get("aktiv", True),
-                key=f"aktiv_{i}"
+                key=f"aktiv_{i}",
             )
 
         with c6:
@@ -189,116 +169,11 @@ with st.expander("2. Ferien / Saisonzeiten"):
 
     if delete_index is not None:
         ferien.pop(delete_index)
-        config["ferien"] = ferien
-
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
-
+        save_config(config)
         st.rerun()
 
-    # -----------------------------
-    # Neue Ferien hinzufügen
-    # -----------------------------
-
-    st.markdown("### Neue Ferien hinzufügen")
-
-    c1, c2, c3, c4 = st.columns([3,1,1,1])
-
-    with c1:
-        neuer_name = st.text_input("Name")
-
-    with c2:
-        neuer_start = st.number_input(
-            "Start-KW",
-            1,
-            53,
-            1
-        )
-
-    with c3:
-        neues_ende = st.number_input(
-            "End-KW",
-            1,
-            53,
-            1
-        )
-
-    with c4:
-        neue_farbe = st.color_picker(
-            "Farbe",
-            "#B4F0FF"
-        )
-
-    if st.button("➕ Ferien hinzufügen"):
-
-        if neuer_name.strip():
-
-            ferien.append({
-                "name": neuer_name.strip(),
-                "start_kw": int(neuer_start),
-                "end_kw": int(neues_ende),
-                "farbe": neue_farbe,
-                "aktiv": True
-            })
-            config["ferien"] = ferien
-            try:
-                with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                    json.dump(config, f, ensure_ascii=False, indent=2)
-
-                st.success("Ferien gespeichert.")
-                st.rerun()
-
-            except Exception as e:
-                st.error(f"Fehler beim Speichern: {e}")
+   
 
 
-            st.rerun()
-# --- 3. Sichtbare Filter auswählen ---
-with st.expander("3. Sichtbare Filter konfigurieren"):
-    if all_columns:
-        selected_filters = st.multiselect(
-            "Aktive Filter-Spalten",
-            options=all_columns,
-            default=[
-                f for f in config["filters"]["visible"]
-                if f in all_columns
-            ],
-            help="Diese Spalten erscheinen in der Sidebar."
-        )
-
-        config["filters"]["visible"] = selected_filters
-    else:
-        st.warning("Keine geeigneten Filter-Spalten gefunden.")
-
-
-st.subheader("💾 Abschluss")
-col_save, col_preview = st.columns([1, 1])
-
-with col_save:
-    if st.button("Einstellungen speichern & Dashboard neu laden", type="primary", use_container_width=True):
-        try:
-            # 1. Sicherstellen, dass der Ordner existiert (falls config.json noch nie da war)
-            CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            
-            # 2. Schreiben der Datei
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-            
-            # 3. Erfolgsmeldung und Neuladen
-            st.balloons()
-            st.success("✅ Gespeichert! Das Dashboard wird neu geladen...")
-            st.rerun() # <--- Wichtig: Erzwingt den Neustart des Skripts
-            
-        except PermissionError:
-            st.error("❌ Zugriff verweigert! Ist die config.json gerade in einem anderen Programm geöffnet oder blockiert durch OneDrive?")
-        except Exception as e:
-            st.error(f"❌ Fehler beim Speichern: {e}")
-            st.info("Tipp: Prüfe, ob der Ordner schreibgeschützt ist.")
-
-with col_preview:
-    with st.expander("Vorschau der config.json"):
-        st.json(config)
-
-st.caption("Hinweis: Änderungen am Mapping werden erst wirksam, nachdem Sie auf 'Speichern' geklickt haben und das Dashboard neu geladen wurde.")
-
-
+with st.expander("Vorschau der config.json"):
+    st.json(config)

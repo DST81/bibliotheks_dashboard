@@ -20,7 +20,7 @@ st.title("👥 Benutzer- und Zielgruppenanalyse")
 
 # Prüfen, ob Daten geladen wurden
 if 'data' not in st.session_state or st.session_state['data'] is None:
-    st.error("Keine Daten geladen. Bitte starten Sie das Dashboard über die [Startseite](../app.py).")
+    st.error("Keine Daten geladen. Bitte starten Sie das Dashboard über die Startseite.")
     st.stop()
 
 # Daten aus dem globalen Speicher laden
@@ -44,10 +44,10 @@ if df_ausleihe is None:
     df_ausleihe = pd.DataFrame()
 
 # ==============================================================================
-# 2. VALIDIERUNG (Falls noch nicht in app.py geschehen)
+# 2. VALIDIERUNG (Falls noch nicht auf der Startseite geschehen)
 # ==============================================================================
-# Falls du die Validierung aus app.py entfernt hast, muss sie HIER passieren.
-# Falls sie in app.py läuft, sind df_users bereits die Spalten 'Ort_Validiert' etc. vorhanden.
+# Falls du die Validierung aus der Startseite entfernt hast, muss sie HIER passieren.
+# Falls sie auf der Startseite läuft, sind in df_users bereits die Spalten 'Ort_Validiert' etc. vorhanden.
 
 df_swiss = None
 if 'ref_swiss' in st.session_state and st.session_state['ref_swiss'] is not None:
@@ -73,7 +73,7 @@ if df_swiss is not None and 'Ort_Validiert' not in df_users.columns:
 # --- HIER DIE NEUE FILTER-FUNKTION AUFRUFEN ---
 
 # Wir nutzen eine Dummy-Variable '_' für den zweiten Rückgabewert (df_extra), der hier None ist.
-df_filtered, _, filter_info = get_sidebar_filters(df_users, prefix="bib_dashboard")
+df_filtered, _, filter_info = get_sidebar_filters(df_users, prefix="bib_dashboard", expander_defaults={"target": True},)
 #st.write("DEBUG Benutzer: Groups =", filter_info.get('groups'))
 #st.write("DEBUG Benutzer: URL Params =", st.query_params.to_dict())
 
@@ -436,7 +436,7 @@ try:
         st.stop()
 
     df_map['ort_lookup'] = df_map[lookup_col].astype(str).str.strip()
-    df_map['plz_clean'] = df_map['PLZ'].astype(str).str.extract('(\d{4})')[0]
+    df_map['plz_clean'] = df_map['PLZ'].astype(str).str.extract(r'(\d{4})')[0]
 
     df_map['bfs_nr'] = df_map['ort_lookup'].map(ort_to_bfs)
     mask_missing = df_map['bfs_nr'].isna() & df_map['plz_clean'].notna()

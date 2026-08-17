@@ -1,40 +1,73 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import json
 import altair as alt
-from pathlib import Path
-from datetime import date, datetime
+from dotenv import load_dotenv
+from datetime import date, datetime, time
 from dateutil.relativedelta import relativedelta
-from src.utils import load_data,  apply_config, load_swiss_locations,validate_and_clean_locations
+from src.utils import load_data, load_swiss_locations, validate_and_clean_locations, get_library_context
 from src.filters import get_sidebar_filters, build_filtered_data
+from src.pdf_report import build_report_pdf
+from src.report_helpers import build_home_filter_summary, format_pdf_delta
 from components.ui import kpi_box
 import subprocess
 import sys
+import os
+import re
 
+load_dotenv()
 # ToDo: Stichtag rauslöschen im Live-Betrieb
 STICHTAG_VERSCHIEBUNG_TAGE = 30   # Echtbetrieb =0
+BIBLIOTHEK = os.getenv("FILEMAKER_DATABASE")
 
 st.set_page_config(
-    page_title="Bibliothek Seengen - Dashboard",
+    page_title=f"Bibliothek {BIBLIOTHEK} - Dashboard",
     page_icon="📚",
     layout="wide"
 )
 
-st.title("📚 Bibliothek Seengen – Leitungs-Dashboard")
+library_context = get_library_context()
+BIBLIOTHEK = library_context["library_name"]
+
+st.title(f"📚 Bibliothek {BIBLIOTHEK} – Leitungs-Dashboard")
 st.caption("Statusüberblick und strategische Kennzahlen")
+# Daten aktualisieren
+st.sidebar.subheader("Daten neuladen")
+if st.sidebar.button(
+    "Daten aktualisieren",
+    use_container_width=True,
+    help="Laedt alle Daten neu aus dem Bibliothekssystem. Dies dauert einige Minuten."
+):
 
-# --- 1. Konfiguration laden ---
-CONFIG_FILE = Path("data/config.json")
-if CONFIG_FILE.exists():
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        config = json.load(f)
-else:
-    config = {}
-filters_config = config.get('filters', {})
-visible_filters = filters_config.get("visible", [])
-default_filters = filters_config.get("defaults", {})
+    with st.spinner("Daten werden aktualisiert... \n\nDies kann 4-5 Minuten dauern"):
+        fetch_env = os.environ.copy()
+        fetch_env["DASHBOARD_LIBRARY_ID"] = library_context["library_id"]
+        fetch_env["DASHBOARD_CACHE_DIR"] = str(library_context["cache_dir"])
+        result = subprocess.run(
+            [sys.executable, "scripts/fetch_all_data.py"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=fetch_env
+        )
+    if result.returncode == 0:
+        # Streamlit-Cache leeren
+        st.cache_data.clear()
+        st.cache_resource.clear()
 
+        # Session-State zuruecksetzen
+        st.session_state["data"] = None
+        st.session_state["users_validated"] = False
+        st.session_state["ref_swiss"] = None
+
+        st.success("Daten erfolgreich aktualisiert. Dashboard wird neu geladen...")
+
+        st.rerun()
+
+    else:
+        st.error("Fehler beim Aktualisieren der Daten.")
+        st.code(result.stderr)
 # --- 2. DATEN LADEN (ZENTRAL & EFFIZIENT) ---
 
 # 1. Rohdaten laden, falls nicht vorhanden
@@ -90,14 +123,29 @@ metadata = st.session_state["data"].get("metadata", {})
 labels = {
     "loans": "📚 Ausleihen",
     "catalog": "📖 Katalog",
+    "antiquariat": "🏷️ Antiquariat",
     "users": "👥 Benutzer",
-    "smartlibrary": "OpenLibrary" 
+    "smartlibrary": "🔓 OpenLibrary",
+    "preferences": "⚙️ Voreinstellungen",
 }
 
 if metadata:
-    zeilen = []
+    details = []
 
-    for key in ["loans", "catalog", "users", "smartlibrary"]:
+    status_labels = {
+        "missing": "fehlt",
+        "empty": "leer",
+        "error": "Fehler",
+    }
+
+    for key in [
+        "loans",
+        "catalog",
+        "antiquariat",
+        "users",
+        "smartlibrary",
+        "preferences"
+    ]:
         info = metadata.get(key)
 
         if not info:
@@ -105,6 +153,7 @@ if metadata:
 
         datenstand = "-"
         fetch = "-"
+        status = info.get("status", "loaded")
 
         if info.get("data_date"):
             datenstand = datetime.strptime(
@@ -116,29 +165,29 @@ if metadata:
                 info["cached_at"]
             ).strftime("%d.%m.%Y %H:%M Uhr")
 
-        zeilen.append(
-            f"<b>{labels[key]}</b>: "
-            f"Import <b>{fetch}</b>"
-        )
+        details.append({
+            "Datenquelle": labels[key],
+            "Import": fetch if status == "loaded" else "-",
+            "Status": "✓ geladen" if status == "loaded"
+                      else status_labels.get(status, status),
+        })
 
-    st.markdown(f"""
-    <div style="
-        border:1px solid #E6E6E6;
-        border-radius:8px;
-        padding:8px 12px;
-        background:#fafafa;
-        font-size:0.9rem;
-        line-height:1.35;
-        margin-bottom:10px;
-    ">
-        <b>🕒Letzte Datenaktualisierung - Datenstand {datenstand}</b><br>
-        {' &nbsp;&nbsp;|&nbsp;&nbsp; '.join(zeilen)}
-    </div>
-    """, unsafe_allow_html=True)
+
+    # Detailinformationen
+    with st.expander(f"🕒 Letzte Datenaktualisierung · Datenstand {datenstand}"):
+        col1,col2 = st.columns([0.1,2])
+        with col2:
+            st.dataframe(
+                pd.DataFrame(details),
+                hide_index=True,
+                use_container_width=True,
+            )
 
 data = st.session_state['data']
 df_ausleihe = data.get("loans")
 df_users = data.get("users")
+df_smartlibrary = data.get("smartlibrary", pd.DataFrame())
+df_preferences = data.get("preferences", pd.DataFrame())
 data_dates = data.get("dates", {}) # Die Datums-Infos holen
 
 # --- NEU: Zentrale Datenstand-Anzeige ---
@@ -155,53 +204,18 @@ if available_dates:
     # Joinen der Liste zu einem String
     date_string = " | ".join(available_dates)
     st.caption(f"📅 Datenstand: {date_string}")
-    st.divider() # Optional: Ein Trennstrich unter Titel und Datenstand
+    #st.divider() # Optional: Ein Trennstrich unter Titel und Datenstand
 
 # Prüfen ob Ausleihdaten da sind (explizit)
 if df_ausleihe is None or df_ausleihe.empty:
     st.error("Keine Ausleihdaten verfügbar.")
     st.stop()
 
-# --- 4. Config anwenden ---
-df_ausleihe = apply_config(df_ausleihe, config)
-
 # --- Sidebar Filter ---
 # st.sidebar.header("Globale Filter")
 # st.sidebar.info("Diese Filter gelten für alle Seiten des Dashboards.")
 
-# Daten aktualisieren
-st.sidebar.subheader("Daten neuladen")
-if st.sidebar.button(
-    "🔄 Daten aktualisieren",
-    use_container_width=True,
-    help="Lädt alle Daten neu aus dem Bibliothekssystem. Dies dauert einige Minuten."
-):
 
-    with st.spinner("⏳ Daten werden aktualisiert... \n\nDies kann 4-5 Minuten dauern"):
-        result= subprocess.run(
-            [sys.executable, "scripts/fetch_all_data.py"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace"
-        )
-    if result.returncode==0:
-        #Streamlit-Cache leeren
-        st.cache_data.clear()
-        st.cache_resource.clear()
-
-        #Session-State zurücksetzten
-        st.session_state["data"] = None
-        st.session_state["users_validated"]=False
-        st.session_state["ref_swiss"]=None
-        
-        st.success("✅ Daten erfolgreich aktualisiert. Dashboard wird neu geladen...")
-
-        st.rerun()
-
-    else:
-        st.error("❌ Fehler beim Aktualisieren der Daten.")
-        st.code(result.stderr)
 st.sidebar.divider()
 
 filtered_users, filtered_loans, filter_state = get_sidebar_filters(
@@ -235,21 +249,23 @@ filtered = build_filtered_data(
     filter_state
 )
 filtered_df = filtered["loans"]
+filtered_df_no_date = filtered["loans_no_date"].copy()
 # Datumsfelder bereinigen
-filtered_df["Ausleihdatum"] = pd.to_datetime(
-    filtered_df["Ausleihdatum"],
-    errors="coerce"
-)
+for df_dates in [filtered_df, filtered_df_no_date]:
+    df_dates["Ausleihdatum"] = pd.to_datetime(
+        df_dates["Ausleihdatum"],
+        errors="coerce"
+    )
 
-filtered_df["Ausleihe bis"] = pd.to_datetime(
-    filtered_df["Ausleihe bis"],
-    errors="coerce"
-)
+    df_dates["Ausleihe bis"] = pd.to_datetime(
+        df_dates["Ausleihe bis"],
+        errors="coerce"
+    )
 
-filtered_df["Rückgabedatum"] = pd.to_datetime(
-    filtered_df["Rückgabedatum"],
-    errors="coerce"
-)
+    df_dates["Rückgabedatum"] = pd.to_datetime(
+        df_dates["Rückgabedatum"],
+        errors="coerce"
+    )
 
 heute = (
     pd.Timestamp.today()
@@ -260,17 +276,17 @@ aktuelles_jahr = heute.year
 vorjahr = aktuelles_jahr - 1
 
 # Aktuelles Jahr und Vorjahr
-df_aktuelles_jahr = filtered_df[
-    filtered_df["Ausleihdatum"].dt.year == aktuelles_jahr
+df_aktuelles_jahr = filtered_df_no_date[
+    filtered_df_no_date["Ausleihdatum"].dt.year == aktuelles_jahr
 ]
 
-df_vorjahr = filtered_df[
-    filtered_df["Ausleihdatum"].dt.year == vorjahr
+df_vorjahr = filtered_df_no_date[
+    filtered_df_no_date["Ausleihdatum"].dt.year == vorjahr
 ]
 
 # Offene und überfällige Ausleihen (aktueller Bestand)
-offene_medien = filtered_df[
-    filtered_df["Rückgabedatum"].isna()
+offene_medien = filtered_df_no_date[
+    filtered_df_no_date["Rückgabedatum"].isna()
 ]
 
 # Offene Ausleihen nach Medienart
@@ -424,7 +440,7 @@ with col2:
     kpi_box(
         "🔓 Offene Ausleihen",
         open_loans,
-        f"Überfällig: {ueberfaellig}"
+        subtext=f"Überfällig: {ueberfaellig}"
     )
 
 with col3:
@@ -551,7 +567,159 @@ with rechts:
                 )
             }
     )
-st.divider()
+
+
+
+def _norm_text(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _parse_time_value(value):
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    match = re.search(r"(\d{1,2})[:.](\d{2})", text)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+    match = re.search(r"\b(\d{1,2})\b", text)
+    if match:
+        hour = int(match.group(1))
+        if 0 <= hour <= 23:
+            return hour, 0
+    return None
+
+
+def _find_branch_col(df):
+    for col in df.columns:
+        name = _norm_text(col)
+        if name in {"zweigstelle", "filiale", "standort", "bibliothek"}:
+            return col
+    return None
+
+
+
+def _parse_opening_time(text):
+    match = re.search(r"(\d{1,2})[.:](\d{2})", str(text or ""))
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return hour, minute
+    return None
+
+
+def _parse_staffed_openings(opening_text):
+    weekday_map = {
+        "mo": 0,
+        "montag": 0,
+        "di": 1,
+        "dienstag": 1,
+        "mi": 2,
+        "mittwoch": 2,
+        "do": 3,
+        "donnerstag": 3,
+        "fr": 4,
+        "freitag": 4,
+        "sa": 5,
+        "samstag": 5,
+        "so": 6,
+        "sonntag": 6,
+    }
+    openings = {idx: [] for idx in range(7)}
+    for raw_line in str(opening_text or "").replace("\r", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        day_match = re.match(r"^([A-Za-z??????]{2,10})\b", line)
+        if not day_match:
+            continue
+        day_key = _norm_text(day_match.group(1))
+        if day_key not in weekday_map:
+            continue
+        times = re.findall(r"(\d{1,2}[.:]\d{2})", line)
+        if len(times) < 2:
+            continue
+        close_time = _parse_opening_time(times[-1])
+        if close_time:
+            openings[weekday_map[day_key]].append(close_time)
+    return openings
+
+
+def _preference_branch_openings(preferences, branch):
+    if preferences is None or preferences.empty:
+        return None, None, None
+
+    row = preferences.iloc[0]
+    branch_key = str(branch or "").strip().lower()
+    fallback = None
+
+    for idx in range(1, 10):
+        branch_col = f"Zweigstellen({idx})"
+        opening_col = f"Oeffnungszeiten 0({idx})"
+        opening_text = row.get(opening_col)
+        if not str(opening_text or "").strip():
+            continue
+        fallback = fallback or (opening_text, opening_col, row.get(branch_col, ""))
+        configured_branch = str(row.get(branch_col, "")).strip().lower()
+        if configured_branch and configured_branch == branch_key:
+            return opening_text, opening_col, configured_branch
+
+    if fallback:
+        return fallback
+    return None, None, None
+
+
+def _last_staffed_opening(preferences, branch, now):
+    opening_text, opening_col, _ = _preference_branch_openings(preferences, branch)
+    if not opening_text:
+        return None, None
+
+    openings = _parse_staffed_openings(opening_text)
+    for days_back in range(0, 21):
+        candidate_date = (now - pd.Timedelta(days=days_back)).normalize()
+        weekday = int(candidate_date.weekday())
+        close_times = sorted(openings.get(weekday, []), reverse=True)
+        for hour, minute in close_times:
+            candidate_dt = candidate_date + pd.Timedelta(hours=hour, minutes=minute)
+            if candidate_dt < now:
+                return candidate_dt, opening_col
+
+    return None, opening_col
+
+
+
+def _find_return_timestamp(returns, return_dates):
+    change_candidates = [
+        "geändert",
+        "geändert_loan",
+        "geaendert",
+        "geaendert_loan",
+        "Geändert",
+        "Geändert_loan",
+    ]
+    for col in change_candidates:
+        if col not in returns.columns:
+            continue
+        changed = pd.to_datetime(returns[col], errors="coerce")
+        same_day = (
+            changed.notna()
+            & return_dates.notna()
+            & changed.dt.date.eq(return_dates.dt.date)
+        )
+        if same_day.any():
+            timestamp = return_dates.copy()
+            timestamp.loc[same_day] = changed.loc[same_day]
+            return timestamp, col
+
+    return return_dates, None
+
+
 # Ausleihkanal bestimmen
 def ermittle_kanal(x):
     if str(x).startswith("App"):
@@ -566,13 +734,13 @@ if "Transaktion(1)" in df_ausleihe.columns:
     )
 else:
     df_ausleihe["Ausleihkanal"] = "Theke"
-
-
 # =====================================================
 # Ausleihtrend aktuelles Jahr
 # =====================================================
 
 st.subheader("📈 Ausleihtrend aktuelles Jahr")
+
+home_trend_chart = None
 
 if "Ausleihdatum" in df_ausleihe.columns:
 
@@ -612,8 +780,13 @@ if "Ausleihdatum" in df_ausleihe.columns:
     df_beide["Jahr"] = df_beide["Ausleihdatum"].dt.year
     df_beide["Monat"] = df_beide["Ausleihdatum"].dt.month
 
-    # Für die KPIs unten weiterhin nur das aktuelle Jahr
-    df_trend = df_beide[df_beide["Jahr"] == aktuelles_jahr].copy()
+    stichtag_vorjahr = heute - pd.DateOffset(years=1)
+
+    # Für die KPIs unten: aktuelles Jahr bis heute bzw. verfügbare Daten.
+    df_trend = df_beide[
+        (df_beide["Jahr"] == aktuelles_jahr)
+        & (df_beide["Ausleihdatum"] <= heute)
+    ].copy()
 
     # --------------------------------------------------
     # Monatswerte nach Kanal, für BEIDE Jahre
@@ -875,6 +1048,8 @@ if "Ausleihdatum" in df_ausleihe.columns:
         )
     )
 
+    home_trend_chart = chart
+
     st.altair_chart(
         chart,
         use_container_width=True
@@ -894,16 +1069,10 @@ if "Ausleihdatum" in df_ausleihe.columns:
         else 0
     )
     df_vorjahr = df_beide[
-        (
-            (df_beide["Jahr"] == vorjahr)
-            & (df_beide["Ausleihdatum"].dt.month < heute.month)
-        )
-        |
-        (
-            (df_beide["Jahr"] == vorjahr)
-            & (df_beide["Ausleihdatum"].dt.month == heute.month)
-            & (df_beide["Ausleihdatum"].dt.day <= heute.day)
-        )
+        (df_beide["Jahr"] == vorjahr)
+    ].copy()
+    df_vorjahr_bis_stichtag = df_vorjahr[
+        df_vorjahr["Ausleihdatum"] <= stichtag_vorjahr
     ].copy()
 
     app_quote_vorjahr = (
@@ -916,7 +1085,7 @@ if "Ausleihdatum" in df_ausleihe.columns:
     app_delta = app_quote - app_quote_vorjahr
 
     ausleihen_aktuell = len(df_trend)
-    ausleihen_vorjahr =len(df_vorjahr)
+    ausleihen_vorjahr = len(df_vorjahr_bis_stichtag)
     ausleihen_delta=ausleihen_aktuell - ausleihen_vorjahr
     veraenderung =(
         ausleihen_delta/ ausleihen_vorjahr *100
@@ -930,8 +1099,8 @@ if "Ausleihdatum" in df_ausleihe.columns:
             "📱 App-Anteil",
             f"{app_quote:.1f} %",
             previous=f"{app_quote_vorjahr:.1f} %",
-            previous_label=str(vorjahr),
-            subtext=f"{symbol} {app_delta:+.1f} %-Pkt.",
+            previous_label=f"Vorjahr {str(vorjahr)}",
+            subtext=f"{symbol} {app_delta:+.1f} %",
             color=farbe
         )
 
@@ -939,10 +1108,10 @@ if "Ausleihdatum" in df_ausleihe.columns:
         farbe = "#2E7D32" if veraenderung >= 0 else "#C62828"
         symbol = "🟢" if veraenderung >= 0 else "🔴"
         kpi_box(
-            "📚 Ausleihen",
+            f"📚 Aktuelle Ausleihen bis {heute.strftime("%d.%B")}",
             ausleihen_aktuell,
             previous=ausleihen_vorjahr,
-            previous_label=f"{vorjahr}",
+            previous_label=f"Vorjahres Ausleihen bis {heute.strftime("%d.%B")} {vorjahr}",
             subtext = f"{symbol} {veraenderung:+.1f} %",
             color =farbe
     )
@@ -950,16 +1119,310 @@ if "Ausleihdatum" in df_ausleihe.columns:
 else:
     st.write("Keine Daten vorhanden")
 
+
+st.subheader("Zutritte und Rückgaben seit letzter bedienter Öffnungszeit")
+
+if df_preferences is None or df_preferences.empty:
+    st.info(
+        "Noch keine Voreinstellungen im Cache gefunden. "
+        "Nach dem nächsten Datenabruf wird das Layout `Voreinstellungen` mitgeladen."
+    )
+else:
+    returns_base = filtered_df_no_date.copy()
+    latest_candidates = []
+    if "Rückgabedatum" in returns_base.columns:
+        latest_candidates.append(pd.to_datetime(returns_base["Rückgabedatum"], errors="coerce").max())
+    if df_smartlibrary is not None and not df_smartlibrary.empty and "erstellt" in df_smartlibrary.columns:
+        latest_candidates.append(pd.to_datetime(df_smartlibrary["erstellt"], errors="coerce").max())
+    latest_candidates = [value for value in latest_candidates if pd.notna(value)]
+    default_now = max(latest_candidates) if latest_candidates else pd.Timestamp.now()
+
+    with st.expander("Test-Zeitpunkt", expanded=False):
+        col_date, col_time = st.columns(2)
+        with col_date:
+            test_date = st.date_input(
+                "Heute-Datum",
+                value=default_now.date(),
+                key="home_workload_test_date",
+            )
+        with col_time:
+            test_time = st.time_input(
+                "Uhrzeit",
+                value=default_now.time().replace(microsecond=0),
+                key="home_workload_test_time",
+            )
+
+    now = pd.Timestamp(datetime.combine(test_date, test_time))
+    branch_col = "Zweigstelle_loan" if "Zweigstelle_loan" in returns_base.columns else "Zweigstelle"
+    branches = (
+        returns_base[branch_col].dropna().astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()
+        if branch_col in returns_base.columns
+        else ["Gesamt"]
+    )
+    branches = sorted(branches) or ["Gesamt"]
+
+    workload_rows = []
+    for branch in branches:
+        last_opening, source_col = _last_staffed_opening(df_preferences, branch, now)
+        if last_opening is None:
+            workload_rows.append({
+                "Zweigstelle": branch,
+                "Seit": "nicht erkannt",
+                "App-Rückgaben": np.nan,
+                "Zutritte": np.nan,
+                "Hinweis": "Öffnungszeitenfeld nicht erkannt",
+            })
+            continue
+
+        returns = returns_base.copy()
+        if branch_col in returns.columns and branch != "Gesamt":
+            returns = returns[returns[branch_col].astype(str).str.strip().eq(str(branch))]
+
+        return_dates = pd.to_datetime(returns.get("Rückgabedatum"), errors="coerce")
+        return_timestamps, timestamp_source = _find_return_timestamp(returns, return_dates)
+        return_channel = (
+            returns.get("Transaktion(2)", pd.Series("", index=returns.index))
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        app_return_mask = (
+            (return_timestamps >= last_opening)
+            & (return_timestamps <= now)
+            & return_channel.str.startswith("App", na=False)
+        )
+        app_returns = returns[app_return_mask].copy()
+
+        smart = df_smartlibrary.copy() if df_smartlibrary is not None else pd.DataFrame()
+        if not smart.empty and "erstellt" in smart.columns:
+            smart["erstellt"] = pd.to_datetime(smart["erstellt"], errors="coerce")
+            visits = smart[
+                (smart["erstellt"] >= last_opening)
+                & (smart["erstellt"] <= now)
+            ]
+            visit_count = len(visits)
+        else:
+            visit_count = np.nan
+
+
+        wochentage = [
+            "Montag",
+            "Dienstag",
+            "Mittwoch",
+            "Donnerstag",
+            "Freitag",
+            "Samstag",
+            "Sonntag",
+        ]
+        wochentag = wochentage[last_opening.weekday()]
+
+        workload_rows.append({
+            "Zweigstelle": branch,
+            "Seit": f"{wochentag}, {last_opening.strftime('%d.%m.%Y %H:%M')}",
+            "App-Rückgaben": len(app_returns),
+            "Zutritte": visit_count,
+            "Hinweis": f"{source_col or ''}; Zeitfeld: {timestamp_source or 'nur Datum'}",
+        })
+
+    workload = pd.DataFrame(workload_rows)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        kpi_box("App-Rückgaben", int(pd.to_numeric(workload["App-Rückgaben"], errors="coerce").fillna(0).sum()))
+    with c2:
+        kpi_box("Zutritte", int(pd.to_numeric(workload["Zutritte"], errors="coerce").fillna(0).sum()))
+    with c3:
+        recognized = workload["Seit"].ne("nicht erkannt").sum()
+        kpi_box("Zweigstellen erkannt", f"{recognized}/{len(workload)}")
+    st.markdown("<br>", unsafe_allow_html=True)
+    # Plot-Daten je Zweigstelle vorbereiten
+    workload_plot = workload.copy()
+
+    workload_plot["App-Rückgaben"] = pd.to_numeric(
+        workload_plot["App-Rückgaben"],
+        errors="coerce"
+    ).fillna(0)
+
+    workload_plot["Zutritte"] = pd.to_numeric(
+        workload_plot["Zutritte"],
+        errors="coerce"
+    ).fillna(0)
+
+    # Für Altair ins Long-Format bringen
+    workload_long = workload_plot.melt(
+        id_vars=["Zweigstelle"],
+        value_vars=["App-Rückgaben", "Zutritte"],
+        var_name="Kennzahl",
+        value_name="Anzahl",
+    )
+
+    # Sortierung nach gesamter Arbeitslast
+    branch_order = (
+        workload_plot
+        .assign(
+            Gesamt=workload_plot["App-Rückgaben"] + workload_plot["Zutritte"]
+        )
+        .sort_values("Gesamt", ascending=False)["Zweigstelle"]
+        .tolist()
+    )
+
+    workload_chart = (
+        alt.Chart(workload_long)
+        .mark_bar(
+            cornerRadiusEnd=6,
+            height=18,
+        )
+        .encode(
+            y=alt.Y(
+                "Zweigstelle:N",
+                title=None,
+                sort=branch_order,
+                axis=alt.Axis(
+                    labelFontSize=13,
+                    labelLimit=220,
+                ),
+            ),
+            x=alt.X(
+                "Anzahl:Q",
+                title="Anzahl seit letzter bedienter Öffnungszeit",
+                axis=alt.Axis(
+                    grid=True,
+                    tickMinStep=1,
+                ),
+            ),
+            yOffset=alt.YOffset("Kennzahl:N"),
+            color=alt.Color(
+                "Kennzahl:N",
+                title=None,
+                scale=alt.Scale(
+                    domain=["App-Rückgaben", "Zutritte"],
+                    range=["#E76F51", "#2A9D8F"],
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("Zweigstelle:N", title="Zweigstelle"),
+                alt.Tooltip("Kennzahl:N", title="Kennzahl"),
+                alt.Tooltip("Anzahl:Q", title="Anzahl", format=",.0f"),
+            ],
+        )
+    )
+
+    workload_labels = (
+        alt.Chart(workload_long)
+        .mark_text(
+            align="left",
+            baseline="middle",
+            dx=5,
+            fontSize=12,
+            fontWeight="bold",
+        )
+        .encode(
+            y=alt.Y(
+                "Zweigstelle:N",
+                sort=branch_order,
+            ),
+            yOffset=alt.YOffset("Kennzahl:N"),
+            x=alt.X("Anzahl:Q"),
+            text=alt.Text("Anzahl:Q", format=",.0f"),
+            detail="Kennzahl:N",
+        )
+    )
+
+    chart_height = max(180, len(branch_order) * 65)
+
+    st.altair_chart(
+        (workload_chart + workload_labels)
+        .properties(height=chart_height)
+        .configure_view(strokeWidth=0),
+        use_container_width=True,
+    )
+
+    st.dataframe(
+        workload.drop(columns=["Hinweis"], errors="ignore"),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption(
+        "Rückgaben verwenden das Ausleihe-Feld `geändert` als Zeitstempel, wenn dessen Datum dem Rückgabedatum entspricht."
+    )
+
 st.divider()
-st.markdown("""
-### Navigation
-Nutzen Sie das Menü links, um detaillierte Analysen zu sehen:
-- **📊 Ausleihen**: Detaillierte Transaktionsanalysen.
-- **👥 Benutzer**: Zielgruppenanalyse, **Datenqualitäts-Check** und Karte.
-- **📚 Medien**: Bestandsumlauf und Top-Listen.
-- **🔓 OpenLibrary**: Spezifische Analysen zur Selbstbedienung.
-- **⚙️ Einstellungen**: Dashboard konfigurieren.
-""")
+st.subheader("📄 Bericht exportieren")
+st.caption(
+    "Erstellt einen kompakten PDF-Bericht mit den wichtigsten Kennzahlen, "
+    "aktiven Filtern und dem Ausleihtrend der Startseite."
+)
+
+if st.button("📄 PDF erstellen", key="home_pdf_erstellen_button"):
+    with st.spinner("PDF wird erstellt..."):
+        home_kpis = {
+            "Ausleihen": (
+                f"{total_loans:,}".replace(",", "'")
+                + f"\n{vorjahr}: {total_loans_old:,}".replace(",", "'")
+                + f"\n{format_pdf_delta(total_loans, total_loans_old)}"
+            ),
+            "Offene Ausleihen": (
+                f"{open_loans:,}".replace(",", "'")
+                + f"\nÜberfällig: {ueberfaellig:,}".replace(",", "'")
+            ),
+            "Aktive Kund:innen": (
+                f"{active_users:,}".replace(",", "'")
+                + f"\n{vorjahr}: {active_users_old:,}".replace(",", "'")
+                + f"\n{format_pdf_delta(active_users, active_users_old)}"
+            ),
+            "Neue Kund:innen": (
+                f"{new_users:,}".replace(",", "'")
+                + f"\n{vorjahr}: {new_users_old:,}".replace(",", "'")
+                + f"\n{format_pdf_delta(new_users, new_users_old)}"
+            ),
+        }
+
+        home_charts = []
+        if home_trend_chart is not None:
+            home_charts.append((
+                f"Ausleihtrend {aktuelles_jahr} vs. {vorjahr}",
+                home_trend_chart,
+            ))
+
+        if not offene_medienart.empty:
+            offene_chart = (
+                alt.Chart(offene_medienart.head(10))
+                .mark_bar(color="#4C78A8")
+                .encode(
+                    x=alt.X("Offen:Q", title="Offene Ausleihen"),
+                    y=alt.Y("Medienart:N", title="Medienart", sort="-x"),
+                    tooltip=[
+                        alt.Tooltip("Medienart:N", title="Medienart"),
+                        alt.Tooltip("Offen:Q", title="Offen"),
+                        alt.Tooltip("Überfällig:Q", title="Überfällig"),
+                    ],
+                )
+                .properties(height=280)
+            )
+            home_charts.append(("Offene Ausleihen nach Medienart", offene_chart))
+
+        report = build_report_pdf(
+            title=f"Bibliothek {BIBLIOTHEK} - Leitungsbericht",
+            subtitle=f"Kompakter Statusbericht der Startseite für {aktuelles_jahr}.",
+            kpis=home_kpis,
+            filters=build_home_filter_summary(filter_state),
+            charts=home_charts,
+        )
+
+    if report.failed_charts:
+        st.warning(
+            "⚠️ Folgende Diagramme konnten nicht ins PDF eingebettet werden:\n\n"
+            + "\n".join(f"- **{titel}**: {fehler}" for titel, fehler in report.failed_charts)
+        )
+
+    st.success("PDF wurde erstellt.")
+    st.download_button(
+        "⬇️ PDF herunterladen",
+        data=report.pdf_bytes,
+        file_name=f"leitungsbericht_{datetime.now():%Y%m%d_%H%M}.pdf",
+        mime="application/pdf",
+    )
+
+
 
 # =========================================================================
 # 🛡️ KOMPAKTER DATENQUALITÄTS-HINWEIS (Nur Ampel-Funktion)
@@ -984,23 +1447,34 @@ if df_users is not None and 'Ort_Match_Status' in df_users.columns:
     total = len(df_users)
     good_rate = ((count_ok + count_corr) / total * 100) if total > 0 else 0
     
+    problem_count = count_unknown + count_incomplete
+    has_quality_issues = problem_count > 0
+
     st.divider()
-    st.subheader("📊 Datenqualitäts-Status (Benutzer)")
-    
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Zugeordnete Orte", f"{good_rate:.1f}%")
-    c2.metric("Problematische Einträge", f"{count_unknown + count_incomplete:,}")
-    
-    if count_unknown > 0 or count_incomplete > 0:
-        c3.metric("Handlungsbedarf", "Ja", delta_color="inverse")
-        st.warning(f"""
-        **Achtung:** Es liegen **{count_unknown}** fehlerhafte Orte und **{count_incomplete}** unvollständige Datensätze vor.
-        
-        👉 **Bitte prüfen Sie die Details auf der Seite [👥 Benutzer](pages/02_Benutzer.py)**, um diese zu bereinigen.
-        """)
-    else:
-        c3.metric("Handlungsbedarf", "Nein", delta_color="off")
-        st.success("✅ Alle Benutzerdaten sind vollständig und korrekt zugeordnet.")
+    if has_quality_issues:
+        st.warning(
+            f"⚠️ Datenqualität Benutzer: {problem_count:,} problematische Einträge. "
+            "Details und Bereinigung auf der Seite Benutzer."
+        )
+
+    with st.expander(
+        "📊 Datenqualität Benutzer",
+        expanded=has_quality_issues
+    ):
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Zugeordnete Orte", f"{good_rate:.1f}%")
+        c2.metric("Problematische Einträge", f"{problem_count:,}")
+
+        if has_quality_issues:
+            c3.metric("Handlungsbedarf", "Ja", delta_color="inverse")
+            st.info(
+                f"Es liegen **{count_unknown}** fehlerhafte Orte und "
+                f"**{count_incomplete}** unvollständige Datensätze vor. "
+                "Die Detailprüfung ist auf der Seite **👥 Benutzer**."
+            )
+        else:
+            c3.metric("Handlungsbedarf", "Nein", delta_color="off")
+            st.success("✅ Alle Benutzerdaten sind vollständig und korrekt zugeordnet.")
 
 # =========================================================================
 # Kurzer Hinweis zu anderen Datenqualitäts-Problemen (Optional)
@@ -1010,4 +1484,5 @@ col_grp_raw = df_users['Benutzergruppe'].astype(str) if df_users is not None els
 grp_issues = col_grp_raw.nunique() - col_grp_raw.str.strip().nunique() if len(col_grp_raw) > 0 else 0
 
 if grp_issues > 0:
-    st.info(f"ℹ️ Hinweis: Es wurden auch **{grp_issues}** Inkonsistenzen in den Benutzergruppen gefunden (z.B. durch Leerzeichen). Details siehe Seite **👥 Benutzer**.")
+    with st.expander("ℹ️ Weitere Datenqualitätshinweise", expanded=False):
+        st.info(f"Es wurden **{grp_issues}** Inkonsistenzen in den Benutzergruppen gefunden (z.B. durch Leerzeichen). Details siehe Seite **👥 Benutzer**.")

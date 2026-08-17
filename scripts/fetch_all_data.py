@@ -16,15 +16,27 @@ except Exception:
     pass
 
 # Lade .env Datei explizit
-load_dotenv()
+load_dotenv(override=True)
+
+LIBRARY_ID = os.getenv("DASHBOARD_LIBRARY_ID", "").strip()
+LIBRARY_ENV_SUFFIX = re.sub(r"[^a-zA-Z0-9_]+", "_", LIBRARY_ID).upper() if LIBRARY_ID else ""
+
+
+def library_env(name, default=None):
+    if LIBRARY_ENV_SUFFIX:
+        value = os.getenv(f"{name}_{LIBRARY_ENV_SUFFIX}")
+        if value:
+            return value
+    return os.getenv(name, default)
+
 
 # --- KONFIGURATION ---
-SERVER = os.getenv("FILEMAKER_SERVER")
-DATABASE = os.getenv("FILEMAKER_DATABASE")
-USER = os.getenv("FILEMAKER_USER")
-PASSWORD = os.getenv("FILEMAKER_PASSWORD")
-SINGLE_LAYOUT = os.getenv("FILEMAKER_LAYOUT") # Der einzelne Layout Name aus .env
-MODIFIED_FIELD = os.getenv("FILEMAKER_MODIFIED_FIELD", "geändert")
+SERVER = library_env("FILEMAKER_SERVER")
+DATABASE = library_env("FILEMAKER_DATABASE")
+USER = library_env("FILEMAKER_USER")
+PASSWORD = library_env("FILEMAKER_PASSWORD")
+SINGLE_LAYOUT = library_env("FILEMAKER_LAYOUT") # Der einzelne Layout Name aus .env
+MODIFIED_FIELD = library_env("FILEMAKER_MODIFIED_FIELD", "geändert")
 
 # Validierung der Umgebungsvariablen
 if not all([SERVER, DATABASE, USER, PASSWORD]):
@@ -35,12 +47,14 @@ SERVER = SERVER.rstrip('/')
 
 # Definiere die Liste der Layouts
 # Option A: Nutze die hardcodierte Liste (empfohlen für den Multi-Export)
-LAYOUTS = ["Ausleihe Liste", "SmartLibraryProtokoll", "Katalogisieren", "Benutzer_Dashboard"]
+LAYOUTS = ["Ausleihe Liste", "SmartLibraryProtokoll", "Katalogisieren", "Antiquariat", "Benutzer_Dashboard", "Voreinstellungen"]
 
 # Mapping: Welches Feld enthält das Änderungsdatum für welches Layout?
 # Wenn ein Layout nicht aufgeführt ist, wird 'geändert' als Standard verwendet.
 MODIFIED_FIELDS_MAP = {
     "Katalog": "Mutationsdatum",       # <--- Hier den exakten Namen eintragen
+    "Katalogisieren": "Mutationsdatum",
+    "Antiquariat": "Mutationsdatum",
     "Ausleihe Liste": "geändert",      # Beispiel, falls das anders heißt
     "Benutzer_Dashboard": "geändert",  # Beispiel
     "SmartLibraryProtokoll": "erstellt" 
@@ -58,7 +72,7 @@ print(f"Verbinde mit Server: {SERVER}")
 print(f"Datenbank: {DATABASE}")
 print(f"Verarbeite Layouts: {LAYOUTS}\n")
 
-CACHE_DIR = Path("data/cache")
+CACHE_DIR = Path(os.getenv("DASHBOARD_CACHE_DIR", "data/cache"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- HILFSFUNKTIONEN ---

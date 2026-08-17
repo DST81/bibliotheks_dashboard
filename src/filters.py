@@ -2,10 +2,234 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import date, timedelta
+from src.utils import normalize_media_id
+
+
+# ============================================================
+# Hilfsfunktionen
+# ============================================================
+
+def _init_state_safe(key, default_value, query_params=None, url_param=None):
+    """Initialisiert einen Session-State-Wert, falls er noch nicht existiert."""
+    if key in st.session_state:
+        return
+
+    if query_params is not None and url_param and url_param in query_params:
+        value = query_params[url_param]
+
+        if isinstance(value, list):
+            value = value[0] if value else ""
+
+        if value not in (None, ""):
+            if isinstance(default_value, tuple):
+                try:
+                    parts = str(value).split(",")
+                    if len(parts) == 2:
+                        st.session_state[key] = tuple(
+                            pd.to_datetime(p).date() for p in parts
+                        )
+                        return
+                except Exception:
+                    pass
+
+            if isinstance(default_value, list):
+                st.session_state[key] = str(value).split(",")
+                return
+
+            try:
+                if isinstance(default_value, bool):
+                    st.session_state[key] = str(value).lower() in (
+                        "1", "true", "ja", "yes", "y"
+                    )
+                    return
+                if isinstance(default_value, int):
+                    st.session_state[key] = int(value)
+                    return
+                if isinstance(default_value, float):
+                    st.session_state[key] = float(value)
+                    return
+            except (ValueError, TypeError):
+                pass
+
+    st.session_state[key] = default_value
+
+
+def _normalize_bool(value):
+    if pd.isna(value):
+        return False
+    return str(value).strip().lower() in (
+        "1", "true", "ja", "yes", "y"
+    )
+
+
+def _clean_gender(value):
+    if pd.isna(value):
+        return "Unbekannt"
+
+    value = str(value).strip()
+
+    if value == "Herr":
+        return "Männlich"
+    if value == "Frau":
+        return "Weiblich"
+
+    return "Andere"
+
+
+def _render_catalog_filter(df_catalog, conf, key_prefix):
+    """
+    Rendert einen Katalogfilter abhängig vom konfigurierten Typ.
+
+    Unterstützte Typen:
+    - multiselect
+    - range
+    - date_preset
+    """
+    col = conf["col"]
+    label = conf.get("label", col)
+    filter_type = conf.get("type", "multiselect")
+    key = f"{key_prefix}_catalog_{col}"
+
+    if col not in df_catalog.columns:
+        return None
+
+    # --------------------------------------------------------
+    # Mehrfachauswahl
+    # --------------------------------------------------------
+    if filter_type == "multiselect":
+        values = (
+            df_catalog[col]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+        values = values[values != ""].unique().tolist()
+
+        # Häufigste Werte zuerst
+        values = (
+            df_catalog.loc[
+                df_catalog[col].notna(),
+                col
+            ]
+            .astype(str)
+            .str.strip()
+            .loc[lambda s: s != ""]
+            .value_counts()
+            .index
+            .tolist()
+        )
+
+        default_values = conf.get("default", [])
+        default_values = [
+            str(v) for v in default_values
+            if str(v) in values
+        ]
+
+        _init_state_safe(key, default_values)
+
+        st.multiselect(
+            label,
+            options=values,
+            key=key,
+            placeholder="Alle",
+            help=(
+                "Tippen, um einen Wert zu suchen."
+                if len(values) > 15 else None
+            ),
+        )
+
+        return st.session_state.get(key, [])
+
+    # --------------------------------------------------------
+    # Zahlenbereich / Slider
+    # --------------------------------------------------------
+    if filter_type == "range":
+        numeric = pd.to_numeric(df_catalog[col], errors="coerce").dropna()
+
+        if numeric.empty:
+            st.caption(f"Keine gültigen Werte für «{label}».")
+            st.session_state[key] = None
+            return None
+
+        minimum = float(numeric.min())
+        maximum = float(numeric.max())
+
+        if minimum == maximum:
+            st.caption(f"{label}: {minimum:g}")
+            st.session_state[key] = (minimum, maximum)
+            return minimum, maximum
+
+        step = conf.get("step", 1.0)
+
+        # Für Preise standardmässig 5 CHF-Schritte
+        if conf.get("currency", False):
+            step = conf.get("step", 5.0)
+
+        _init_state_safe(key, (minimum, maximum))
+
+        # Session-State kann nach Datenänderungen ausserhalb des gültigen
+        # Bereichs liegen. Deshalb vor dem Widget sicher begrenzen.
+        current = st.session_state.get(key, (minimum, maximum))
+
+        try:
+            current = (
+                max(minimum, min(float(current[0]), maximum)),
+                max(minimum, min(float(current[1]), maximum)),
+            )
+            if current[0] > current[1]:
+                current = (minimum, maximum)
+        except (TypeError, ValueError, IndexError):
+            current = (minimum, maximum)
+
+        st.session_state[key] = current
+
+        return st.slider(
+            label,
+            min_value=minimum,
+            max_value=maximum,
+            value=current,
+            step=step,
+            key=key,
+            format="%.0f CHF" if conf.get("currency", False) else None,
+        )
+
+    # --------------------------------------------------------
+    # Aufnahmedatum / Zeit-Presets
+    # --------------------------------------------------------
+    if filter_type == "date_preset":
+        options = conf.get(
+            "options",
+            [
+                "Alle Medien",
+                "Aktuelles Jahr",
+                "Letzte 365 Tage",
+                "Letzte 2 Jahre",
+            ],
+        )
+
+        default = conf.get("default", "Alle Medien")
+        _init_state_safe(key, default)
+
+        return st.selectbox(
+            label,
+            options=options,
+            key=key,
+        )
+
+    st.warning(
+        f"Unbekannter Katalogfilter-Typ '{filter_type}' für '{col}'."
+    )
+    return None
+
+
+# ============================================================
+# SIDEBAR-FILTER
+# ============================================================
 
 def get_sidebar_filters(
-    df_users, 
-    df_extra=None, 
+    df_users,
+    df_extra=None,
+    df_catalog=None,
     prefix="global",
     enable_date_filter=False,
     date_col_name="Ausleihdatum",
@@ -13,107 +237,195 @@ def get_sidebar_filters(
     enable_first_loan_toggle=False,
     first_loan_col_name="Erstausleihe",
     extension_count_col="Verlängerung_Anz",
-    show_metrics=True
+    show_metrics=True,
+    catalog_filters_config=None,
+    expander_defaults=None,
+    expander_labels=None,
 ):
     """
-    ROBUSTE VERSION mit garantiertem Datum-Filter.
+    Zentrale Filterfunktion für Benutzer, Ausleihen und Katalog.
+
+    extra_filters_config:
+        Filter auf df_extra, z.B.
+        [
+            {"col": "Zweigstelle", "label": "Zweigstelle"},
+            {"col": "Medienart", "label": "Medienart"},
+        ]
+
+    catalog_filters_config:
+        Filter auf df_catalog, z.B.
+        [
+            {"col": "Lieferant", "label": "Lieferant", "type": "multiselect"},
+            {"col": "Preis", "label": "Preis (CHF)", "type": "range",
+             "currency": True, "step": 5.0},
+            {"col": "Datum der Aufnahme", "label": "Neuanschaffung",
+             "type": "date_preset"},
+        ]
     """
-        # NEU: Fehlende Daten robust behandeln
+
     if df_users is None:
         df_users = pd.DataFrame()
 
     if df_extra is None:
         df_extra = pd.DataFrame()
-    # --- 0. VORBEREITUNG EXTRA DATEN ---
-    has_extra = df_extra is not None and not df_extra.empty
-    
-    # WICHTIG: date_range_val vorab definieren, damit es immer existiert
-    date_range_val = None 
+
+    if df_catalog is None:
+        df_catalog = pd.DataFrame()
+
+    has_extra = not df_extra.empty
+    has_catalog = not df_catalog.empty
+    expander_defaults = expander_defaults or {}
+    expander_labels = expander_labels or {}
+
+    query_params = st.query_params.to_dict()
+
+    # --------------------------------------------------------
+    # 0. Erstausleihe vorbereiten
+    # --------------------------------------------------------
 
     if has_extra and enable_first_loan_toggle:
         if first_loan_col_name not in df_extra.columns:
             if extension_count_col in df_extra.columns:
-                def is_first_loan(val):
-                    if pd.isna(val): return True
-                    if str(val).strip() == "": return True
+
+                def is_first_loan(value):
+                    if pd.isna(value):
+                        return True
+
+                    if str(value).strip() == "":
+                        return True
+
                     try:
-                        if float(val) == 0: return True
-                    except ValueError:
-                        pass
-                    return False
-                df_extra[first_loan_col_name] = df_extra[extension_count_col].apply(is_first_loan)
+                        return float(value) == 0
+                    except (ValueError, TypeError):
+                        return False
+
+                df_extra = df_extra.copy()
+                df_extra[first_loan_col_name] = (
+                    df_extra[extension_count_col]
+                    .apply(is_first_loan)
+                )
+
             else:
-                if f"{prefix}_warn_shown" not in st.session_state:
-                    st.warning(f"Spalte '{extension_count_col}' fehlt. Erstausleihe-Filter inaktiv.")
-                    st.session_state[f"{prefix}_warn_shown"] = True
+                warn_key = f"{prefix}_warn_shown"
+
+                if warn_key not in st.session_state:
+                    st.warning(
+                        f"Spalte '{extension_count_col}' fehlt. "
+                        "Erstausleihe-Filter inaktiv."
+                    )
+                    st.session_state[warn_key] = True
+
+                df_extra = df_extra.copy()
                 df_extra[first_loan_col_name] = False
+
         else:
-            def normalize_bool(val):
-                if pd.isna(val): return False
-                s = str(val).strip().lower()
-                return s in ["1", "true", "ja", "yes", "y"]
-            df_extra[first_loan_col_name] = df_extra[first_loan_col_name].apply(normalize_bool)
+            df_extra = df_extra.copy()
+            df_extra[first_loan_col_name] = (
+                df_extra[first_loan_col_name]
+                .apply(_normalize_bool)
+            )
 
-    # --- 1. DATEN VORBEREITEN (Demografie) ---
-    group_col = None
+    # --------------------------------------------------------
+    # 1. Benutzerdaten vorbereiten
+    # --------------------------------------------------------
 
-    if df_users is not None and not df_users.empty:
-        if "Benutzergruppe_Gruppiert" in df_users.columns:
-            group_col = "Benutzergruppe_Gruppiert"
-        elif "Benutzergruppe" in df_users.columns:
+    if not df_users.empty:
+        if "Benutzergruppe" in df_users.columns:
             group_col = "Benutzergruppe"
-    gender_col = "Anrede"
+        else:
+            group_col = None
+    else:
+        group_col = None
+
+    df_for_filter = df_users.copy()
+
+    if "Anrede" in df_for_filter.columns:
+        df_for_filter["Geschlecht_Filter"] = (
+            df_for_filter["Anrede"].apply(_clean_gender)
+        )
+    else:
+        df_for_filter["Geschlecht_Filter"] = "Unbekannt"
+
+    # --------------------------------------------------------
+    # Alter berechnen
+    # --------------------------------------------------------
+
+    min_age = 0
+    max_age = 100
+
+    if "Geburtsdatum" in df_for_filter.columns:
+        geburtsdatum = pd.to_datetime(
+            df_for_filter["Geburtsdatum"],
+            format="%m/%d/%Y",
+            errors="coerce",
+        )
+
+        if geburtsdatum.isna().all():
+            geburtsdatum = pd.to_datetime(
+                df_for_filter["Geburtsdatum"],
+                errors="coerce",
+            )
+
+        df_for_filter["Geburtsdatum_DT"] = geburtsdatum
+
+        today_dt = pd.Timestamp.now()
+
+        df_for_filter["Alter_Berechnet"] = (
+            (today_dt - df_for_filter["Geburtsdatum_DT"]).dt.days
+            // 365
+        )
+
+        valid_ages = df_for_filter.loc[
+            df_for_filter["Alter_Berechnet"].between(0, 100),
+            "Alter_Berechnet",
+        ].dropna()
+
+        if not valid_ages.empty:
+            min_age = int(valid_ages.min())
+            max_age = int(valid_ages.max())
+    else:
+        df_for_filter["Alter_Berechnet"] = np.nan
+
+    # --------------------------------------------------------
+    # Self-Service
+    # --------------------------------------------------------
+
     col_door = "Self Service Türöffner"
     col_auth = "Self Service Berechtigung"
-    
-    if df_users is not None:
-        df_for_filter = df_users.copy()
-    else:
-        df_for_filter = pd.DataFrame()
-    
-    def clean_gender(val):
-        if pd.isna(val): return "Unbekannt"
-        val_str = str(val).strip()
-        if val_str == "Herr": return "Männlich"
-        if val_str == "Frau": return "Weiblich"
-        return "Andere"
-    
-    df_for_filter['Geschlecht_Filter'] = df_for_filter[gender_col].apply(clean_gender) if gender_col in df_for_filter.columns else "Unbekannt"
-
-    min_age, max_age = 0, 100
-    if "Geburtsdatum" in df_for_filter.columns:
-        df_for_filter['Geburtsdatum_DT'] = pd.to_datetime(df_for_filter['Geburtsdatum'], format='%m/%d/%Y', errors='coerce')
-        if df_for_filter['Geburtsdatum_DT'].isna().all():
-            df_for_filter['Geburtsdatum_DT'] = pd.to_datetime(df_for_filter['Geburtsdatum'], errors='coerce')
-            
-        today_dt = pd.Timestamp.now()
-        df_for_filter['Alter_Berechnet'] = (today_dt - df_for_filter['Geburtsdatum_DT']).dt.days // 365
-        valid_ages = df_for_filter[(df_for_filter['Alter_Berechnet'] >= 0) & (df_for_filter['Alter_Berechnet'] <= 100)]['Alter_Berechnet']
-        if not valid_ages.empty:
-            min_age, max_age = int(valid_ages.min()), int(valid_ages.max())
-    else:
-        df_for_filter['Alter_Berechnet'] = np.nan
-
-    def normalize_bool(val):
-        if pd.isna(val): return False
-        return str(val).strip().lower() in ["1", "true", "ja", "yes", "y"]
 
     has_door = col_door in df_for_filter.columns
     has_auth = col_auth in df_for_filter.columns
-    
-    df_for_filter['SS_Tueröffner'] = df_for_filter[col_door].apply(normalize_bool) if has_door else False
-    df_for_filter['SS_Berechtigung'] = df_for_filter[col_auth].apply(normalize_bool) if has_auth else False
-            
-    def get_ss_category(row):
-        d, a = row['SS_Tueröffner'], row['SS_Berechtigung']
-        if d and a: return "Türöffner & Berechtigung"
-        elif d: return "Nur Türöffner"
-        elif a: return "Nur Berechtigung"
-        else: return "Keine Self-Service"
-            
-    df_for_filter['SS_Kategorie'] = df_for_filter.apply(get_ss_category, axis=1)
 
-    # --- 2. STATE MANAGEMENT ---
+    df_for_filter["SS_Tueröffner"] = (
+        df_for_filter[col_door].apply(_normalize_bool)
+        if has_door else False
+    )
+
+    df_for_filter["SS_Berechtigung"] = (
+        df_for_filter[col_auth].apply(_normalize_bool)
+        if has_auth else False
+    )
+
+    def get_ss_category(row):
+        door = row["SS_Tueröffner"]
+        auth = row["SS_Berechtigung"]
+
+        if door and auth:
+            return "Türöffner & Berechtigung"
+        if door:
+            return "Nur Türöffner"
+        if auth:
+            return "Nur Berechtigung"
+        return "Keine Self-Service"
+
+    df_for_filter["SS_Kategorie"] = (
+        df_for_filter.apply(get_ss_category, axis=1)
+    )
+
+    # --------------------------------------------------------
+    # Verfügbare Benutzerfilter
+    # --------------------------------------------------------
+
     if group_col:
         unique_groups = sorted(
             df_users[group_col]
@@ -123,392 +435,824 @@ def get_sidebar_filters(
         )
     else:
         unique_groups = []
-    unique_genders = sorted(df_for_filter['Geschlecht_Filter'].dropna().unique())
-    loc_col = 'Ort_Norm' if 'Ort_Norm' in df_for_filter.columns else ('Ort_Validiert' if 'Ort_Validiert' in df_for_filter.columns else 'Wohnort')
-    if loc_col in df_for_filter.columns:
-        unique_locs = sorted(df_for_filter[loc_col].dropna().unique())
+
+    unique_genders = sorted(
+        df_for_filter["Geschlecht_Filter"]
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+
+    if "Ort_Norm" in df_for_filter.columns:
+        loc_col = "Ort_Norm"
+    elif "Ort_Validiert" in df_for_filter.columns:
+        loc_col = "Ort_Validiert"
+    elif "Wohnort" in df_for_filter.columns:
+        loc_col = "Wohnort"
+    else:
+        loc_col = None
+
+    if loc_col:
+        unique_locs = sorted(
+            df_for_filter[loc_col]
+            .dropna()
+            .astype(str)
+            .unique()
+        )
     else:
         unique_locs = []
-    
-    query_params = st.query_params.to_dict()
 
-    def init_state_safe(key, default_val, url_param=None):
-        # ... (bleibt gleich) ...
-        if key not in st.session_state:
-            if url_param and url_param in query_params:
-                val = query_params[url_param]
-                if val:
-                    st.session_state[key] = val.split(',')
-                    return
-            st.session_state[key] = default_val
+    # --------------------------------------------------------
+    # Session State
+    # --------------------------------------------------------
 
-    init_state_safe(f"{prefix}_groups", list(unique_groups), 'groups')
-    init_state_safe(f"{prefix}_gender", list(unique_genders), 'gender')
-    init_state_safe(f"{prefix}_age", (min_age, max_age))
-    
-    default_loc = [] if len(unique_locs) > 20 else list(unique_locs)
-    init_state_safe(f"{prefix}_location", default_loc, 'location')
-    init_state_safe(f"{prefix}_ss_list", [], 'ss')
+    _init_state_safe(
+        f"{prefix}_groups",
+        list(unique_groups),
+        query_params,
+        "groups",
+    )
+
+    _init_state_safe(
+        f"{prefix}_gender",
+        list(unique_genders),
+        query_params,
+        "gender",
+    )
+
+    _init_state_safe(
+        f"{prefix}_age",
+        (min_age, max_age),
+    )
+
+    default_loc = (
+        []
+        if len(unique_locs) > 20
+        else list(unique_locs)
+    )
+
+    _init_state_safe(
+        f"{prefix}_location",
+        default_loc,
+        query_params,
+        "location",
+    )
+
+    _init_state_safe(
+        f"{prefix}_ss_list",
+        [],
+        query_params,
+        "ss",
+    )
+
+    # --------------------------------------------------------
+    # Ausleihfilter initialisieren
+    # --------------------------------------------------------
 
     extra_filter_keys = {}
-    
-    # ============================================================
-    # FIX HIER: Extra-Filter INITIALISIEREN (UNABHÄNGIG VOM DATUM!)
-    # ============================================================
+
     if has_extra and extra_filters_config:
         for conf in extra_filters_config:
-            col = conf['col']
-            if col in df_extra.columns:
-                # Werte bereinigen und unique machen
-                unique_vals = sorted(df_extra[col].dropna().astype(str).unique())
+            col = conf["col"]
 
-                default_cfg = conf.get("default", list(unique_vals))
+            if col not in df_extra.columns:
+                continue
 
-                # Falls Default als Index angegeben wurde
-                if (
-                    isinstance(default_cfg, list)
-                    and len(default_cfg) == 1
-                    and isinstance(default_cfg[0], int)
-                ):
-                    idx = default_cfg[0]
-                    # leere Werte für die Index-Auswahl ignorieren
-                    gültige_werte = [v for v in unique_vals if v.strip() != ""]
+            values = (
+                df_extra[col]
+                .dropna()
+                .astype(str)
+                .str.strip()
+            )
+            values = values[values != ""].unique().tolist()
 
-                    default_vals = [gültige_werte[idx]] if idx < len(gültige_werte) else []
-                else:
-                    default_vals = [str(v) for v in default_cfg if str(v) in unique_vals]
+            default_cfg = conf.get("default", [])
 
-                key_ms = f"{prefix}_ms_{col}"
-                init_state_safe(key_ms, default_vals, f"ex_{col}")
+            if (
+                isinstance(default_cfg, list)
+                and len(default_cfg) == 1
+                and isinstance(default_cfg[0], int)
+            ):
+                idx = default_cfg[0]
+                valid_values = [v for v in values if v.strip()]
 
-                extra_filter_keys[col] = key_ms
+                default_values = (
+                    [valid_values[idx]]
+                    if idx < len(valid_values)
+                    else []
+                )
+            else:
+                default_values = [
+                    str(v)
+                    for v in default_cfg
+                    if str(v) in values
+                ]
 
-    # Vorbereitung für Datum
+            key = f"{prefix}_extra_{col}"
+
+            _init_state_safe(
+                key,
+                default_values,
+                query_params,
+                f"ex_{col}",
+            )
+
+            extra_filter_keys[col] = key
+
+    # --------------------------------------------------------
+    # Datum Ausleihe vorbereiten
+    # --------------------------------------------------------
+
     date_key = f"{prefix}_date_range"
+    valid_date_key = f"{prefix}_date_range_valid"
     mode_key = f"{prefix}_period_mode"
-    min_d, max_d = None, None
+    all_data_label = "Alle verfügbaren Ausleihen"
+    recent_year_label = "Letzte 12 Monate"
+
+    date_range_val = None
+    min_d = None
+    max_d = None
     today = date.today()
 
-    # Datum-Logik bleibt wie vorher, aber OHNE die extra_filters Initialisierung darin
-    if has_extra and enable_date_filter and date_col_name in df_extra.columns:
-        if not pd.api.types.is_datetime64_any_dtype(df_extra[date_col_name]):
-            df_extra[date_col_name] = pd.to_datetime(df_extra[date_col_name], errors='coerce')
-        
-        min_d = df_extra[date_col_name].min().date()
-        max_d = df_extra[date_col_name].max().date()
-        
-        if pd.isna(min_d) or pd.isna(max_d):
-            min_d, max_d = today - timedelta(days=730), today
+    if (
+        has_extra
+        and enable_date_filter
+        and date_col_name in df_extra.columns
+    ):
+        df_extra[date_col_name] = pd.to_datetime(
+            df_extra[date_col_name],
+            errors="coerce",
+        )
+
+        valid_dates = df_extra[date_col_name].dropna()
+
+        if valid_dates.empty:
+            min_d = today - timedelta(days=730)
+            max_d = today
         else:
-            if max_d > today: max_d = today
+            min_d = valid_dates.min().date()
+            max_d = valid_dates.max().date()
+
+            if max_d > today:
+                max_d = today
+
             if max_d - min_d > timedelta(days=730):
                 min_d = max_d - timedelta(days=730)
 
-        if enable_first_loan_toggle:
-            init_state_safe(f"{prefix}_first_loan", False, 'first_loan')
+        if mode_key not in st.session_state:
+            st.session_state[mode_key] = recent_year_label
 
-    # --- 3. RENDERING ---
+        if st.session_state[mode_key] == "Gesamte Daten":
+            st.session_state[mode_key] = all_data_label
+        elif st.session_state[mode_key] == "Vergleich (12 Monate)":
+            st.session_state[mode_key] = recent_year_label
+
+        def on_mode_change():
+            new_mode = st.session_state[mode_key]
+
+            if new_mode == all_data_label:
+                new_range = (min_d, max_d)
+            else:
+                start_date = max_d - timedelta(days=365)
+                if start_date < min_d:
+                    start_date = min_d
+
+                new_range = (start_date, max_d)
+
+            st.session_state[date_key] = new_range
+            st.session_state[valid_date_key] = new_range
+
+        if date_key not in st.session_state:
+            if st.session_state[mode_key] == all_data_label:
+                st.session_state[date_key] = (min_d, max_d)
+            else:
+                start_date = max_d - timedelta(days=365)
+                if start_date < min_d:
+                    start_date = min_d
+
+                st.session_state[date_key] = (start_date, max_d)
+
+        if valid_date_key not in st.session_state:
+            st.session_state[valid_date_key] = st.session_state[date_key]
+
+        _init_state_safe(
+            f"{prefix}_first_loan",
+            True,
+            query_params,
+            "first_loan",
+        )
+
+    # --------------------------------------------------------
+    # 2. RENDERING
+    # --------------------------------------------------------
+
     st.sidebar.header("Filter")
-    # Defaultwerte, falls keine Nutzerdaten vorhanden sind
+
     sel_grp = []
     sel_gen = []
-    sel_age = (0, 100)
+    sel_age = (min_age, max_age)
     sel_ss = []
     sel_loc = []
-    
-    if df_users is not None and not df_users.empty:
-        with st.sidebar.expander("👥 Zielgruppe", expanded=False):
+
+    # --------------------------------------------------------
+    # Zielgruppe
+    # --------------------------------------------------------
+
+    if not df_users.empty:
+        with st.sidebar.expander(
+            expander_labels.get("target", "👥 Zielgruppe"),
+            expanded=expander_defaults.get("target", False),
+        ):
+
             st.subheader("Benutzergruppe")
+
             c1, c2 = st.columns(2)
-            if c1.button("Alle", key=f"{prefix}_btn_all_grp", use_container_width=True):
+
+            if c1.button(
+                "Alle",
+                key=f"{prefix}_btn_all_grp",
+                use_container_width=True,
+            ):
                 st.session_state[f"{prefix}_groups"] = list(unique_groups)
                 st.rerun()
-            if c2.button("Keine", key=f"{prefix}_btn_none_grp", use_container_width=True):
+
+            if c2.button(
+                "Keine",
+                key=f"{prefix}_btn_none_grp",
+                use_container_width=True,
+            ):
                 st.session_state[f"{prefix}_groups"] = []
                 st.rerun()
-                
-            sel_grp = st.multiselect("Wählen", options=unique_groups, key=f"{prefix}_groups", label_visibility="collapsed", placeholder="Alle")
+
+            sel_grp = st.multiselect(
+                "Wählen",
+                options=unique_groups,
+                key=f"{prefix}_groups",
+                label_visibility="collapsed",
+                placeholder="Alle",
+            )
+
             st.subheader("Geschlecht")
-            sel_gen = st.multiselect("Geschlecht", options=unique_genders, key=f"{prefix}_gender", label_visibility="collapsed", placeholder="Alle")
+
+            sel_gen = st.multiselect(
+                "Geschlecht",
+                options=unique_genders,
+                key=f"{prefix}_gender",
+                label_visibility="collapsed",
+                placeholder="Alle",
+            )
 
             st.subheader("Alter")
+
             if "Geburtsdatum" in df_for_filter.columns:
-                sel_age = st.slider("Spanne", min_value=min_age, max_value=max_age, key=f"{prefix}_age")
-            else:
-                sel_age = (0, 100)
-                
+                sel_age = st.slider(
+                    "Spanne",
+                    min_value=min_age,
+                    max_value=max_age,
+                    key=f"{prefix}_age",
+                )
+
             st.subheader("Self-Service")
-            current_ss = st.session_state.get(f"{prefix}_ss_list", [])
-            
+
+            current_ss = st.session_state.get(
+                f"{prefix}_ss_list",
+                [],
+            )
+
             def update_ss():
                 new_ss = []
-                if st.session_state.get(f"{prefix}_cb_both"): new_ss.append("Türöffner & Berechtigung")
-                if st.session_state.get(f"{prefix}_cb_auth"): new_ss.append("Nur Berechtigung")
-                if st.session_state.get(f"{prefix}_cb_door"): new_ss.append("Nur Türöffner")
+
+                if st.session_state.get(
+                    f"{prefix}_cb_both",
+                    False,
+                ):
+                    new_ss.append("Türöffner & Berechtigung")
+
+                if st.session_state.get(
+                    f"{prefix}_cb_auth",
+                    False,
+                ):
+                    new_ss.append("Nur Berechtigung")
+
+                if st.session_state.get(
+                    f"{prefix}_cb_door",
+                    False,
+                ):
+                    new_ss.append("Nur Türöffner")
+
                 st.session_state[f"{prefix}_ss_list"] = new_ss
 
             c_ss1, c_ss2, c_ss3 = st.columns(3)
+
             with c_ss1:
-                st.checkbox("Beides", value="Türöffner & Berechtigung" in current_ss, key=f"{prefix}_cb_both", on_change=update_ss)
+                st.checkbox(
+                    "Beides",
+                    value="Türöffner & Berechtigung" in current_ss,
+                    key=f"{prefix}_cb_both",
+                    on_change=update_ss,
+                )
+
             with c_ss2:
-                st.checkbox("Nur App", value="Nur Berechtigung" in current_ss, key=f"{prefix}_cb_auth", on_change=update_ss)
+                st.checkbox(
+                    "Nur App",
+                    value="Nur Berechtigung" in current_ss,
+                    key=f"{prefix}_cb_auth",
+                    on_change=update_ss,
+                )
+
             with c_ss3:
-                st.checkbox("Nur Tür", value="Nur Türöffner" in current_ss, key=f"{prefix}_cb_door", on_change=update_ss)
-                
-            sel_ss = st.session_state[f"{prefix}_ss_list"]
-            
+                st.checkbox(
+                    "Nur Tür",
+                    value="Nur Türöffner" in current_ss,
+                    key=f"{prefix}_cb_door",
+                    on_change=update_ss,
+                )
+
+            sel_ss = st.session_state.get(
+                f"{prefix}_ss_list",
+                [],
+            )
+
             st.subheader("Wohnort")
-            if len(unique_locs) > 20: st.caption("💡 Tippen zum Suchen")
-            sel_loc = st.multiselect("Orte", options=unique_locs, key=f"{prefix}_location", label_visibility="collapsed", placeholder="Alle")
 
-    # --- DETAILS EXPANDER ---
+            if len(unique_locs) > 20:
+                st.caption("💡 Tippen zum Suchen")
+
+            sel_loc = st.multiselect(
+                "Orte",
+                options=unique_locs,
+                key=f"{prefix}_location",
+                label_visibility="collapsed",
+                placeholder="Alle",
+            )
+
+    # --------------------------------------------------------
+    # Ausleihe
+    # --------------------------------------------------------
+
     if has_extra:
-        with st.sidebar.expander("📊 Details (Ausleihe/Medien)", expanded=True):
-            
-            # Datum Filter Block
-            if enable_date_filter and date_col_name in df_extra.columns:
-                st.markdown("**📅 Zeitraum-Modus**")
-                
-                if mode_key not in st.session_state:
-                    st.session_state[mode_key] = "Vergleich (24 Monate)"
-                
-                def on_mode_change():
-                    new_mode = st.session_state[mode_key]
-                    loc_min = df_extra[date_col_name].min().date()
-                    loc_max = df_extra[date_col_name].max().date()
-                    if loc_max > today: loc_max = today
-                    
-                    if new_mode == "Gesamte Daten":
-                        new_range = (loc_min, loc_max)
-                    else: 
-                        suggested_start = date(loc_max.year - 2, 1, 1)
-                        if suggested_start < loc_min: suggested_start = loc_min
-                        new_range = (suggested_start, loc_max)
-                    
-                    st.session_state[date_key] = new_range
+        with st.sidebar.expander(
+            expander_labels.get("loans", "📊 Ausleihe"),
+            expanded=expander_defaults.get("loans", True),
+        ):
 
-                period_mode = st.radio(
-                    "Ansicht wählen",
-                    options=["Gesamte Daten", "Vergleich (24 Monate)"],
+            if (
+                enable_date_filter
+                and date_col_name in df_extra.columns
+                and min_d is not None
+            ):
+                st.markdown("**📅 Zeitraum**")
+
+                st.radio(
+                    "Zeitraum-Vorauswahl",
+                    options=[
+                        recent_year_label,
+                        all_data_label,
+                    ],
                     key=mode_key,
                     horizontal=True,
                     on_change=on_mode_change,
-                    help="'Gesamte Daten' zeigt alles. 'Vergleich' setzt auf letzte 24 Monate."
+                    label_visibility="collapsed",
                 )
-                
-                if date_key not in st.session_state:
-                    current_mode_init = st.session_state[mode_key]
-                    if current_mode_init == "Gesamte Daten":
-                        st.session_state[date_key] = (min_d, max_d)
-                    else:
-                        start_date = max_d - timedelta(days=730)
-                        if start_date < min_d: start_date = min_d
-                        st.session_state[date_key] = (start_date, max_d)
-                
-                # Das Widget, das den Wert in date_range_val schreibt
+
                 date_range_val = st.date_input(
-                    "Zeitraum (Start - Ende)", 
-                    key=date_key, 
+                    "Zeitraum",
+                    key=date_key,
                     format="DD.MM.YYYY",
-                    help="Wird automatisch angepasst, wenn Sie oben den Modus wechseln."
                 )
-                
-                # Tupel-Sicherheit
-                if not isinstance(date_range_val, tuple):
-                    prev = st.session_state.get(date_key, (today, today))
-                    if isinstance(prev, tuple):
-                        date_range_val = (date_range_val, prev[1])
-                    else:
-                        date_range_val = (date_range_val, date_range_val)
-                
+
+                if (
+                    isinstance(date_range_val, tuple)
+                    and len(date_range_val) == 2
+                ):
+                    st.session_state[valid_date_key] = date_range_val
+                else:
+                    date_range_val = st.session_state.get(
+                        valid_date_key,
+                        (min_d, max_d),
+                    )
+                    st.info(
+                        "Bitte ein Start- und Enddatum wählen. "
+                        "Bis dahin bleibt der letzte vollständige Zeitraum aktiv."
+                    )
+
                 st.divider()
 
             if enable_first_loan_toggle:
                 st.markdown("**⚙️ Optionen**")
-                first_loan_only = st.toggle("Nur Erstausleihen", key=f"{prefix}_first_loan")
+
+                st.toggle(
+                    "Ohne Verlängerungen",
+                    key=f"{prefix}_first_loan",
+                    help=(
+                        "Zeigt nur Erstausleihen bzw. "
+                        "Datensätze ohne Verlängerung."
+                    ),
+                )
+
                 st.divider()
 
             if extra_filters_config:
                 for col, key_ms in extra_filter_keys.items():
-                    label = next((c['label'] for c in extra_filters_config if c['col'] == col), col)
-                    unique_vals = sorted(df_extra[col].dropna().astype(str).unique())
-                    st.multiselect(label, options=unique_vals, key=key_ms, placeholder="Alle")
-                    st.session_state[f"{prefix}_extra_{col}"] = st.session_state[key_ms]
-    
-    # Falls has_extra False ist, aber enable_first_loan_toggle trotzdem gesetzt war (Fallback)
-    if not has_extra and enable_first_loan_toggle:
-         first_loan_only = False
+                    label = next(
+                        (
+                            conf["label"]
+                            for conf in extra_filters_config
+                            if conf["col"] == col
+                        ),
+                        col,
+                    )
 
-    # --- URL SYNC ---
-    def set_param_safe(k, v):
+                    values = sorted(
+                        df_extra[col]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                    )
+
+                    st.multiselect(
+                        label,
+                        options=values,
+                        key=key_ms,
+                        placeholder="Alle",
+                    )
+
+    # --------------------------------------------------------
+    # Medienbestand
+    # --------------------------------------------------------
+
+    catalog_filters = {}
+
+    if has_catalog and catalog_filters_config:
+        with st.sidebar.expander(
+            expander_labels.get("catalog", "📚 Medienbestand"),
+            expanded=expander_defaults.get("catalog", False),
+        ):
+            for conf in catalog_filters_config:
+                col = conf["col"]
+
+                if col not in df_catalog.columns:
+                    continue
+
+                value = _render_catalog_filter(
+                    df_catalog,
+                    conf,
+                    prefix,
+                )
+
+                catalog_filters[col] = value
+
+    # --------------------------------------------------------
+    # URL-Synchronisierung
+    # --------------------------------------------------------
+
+    def set_param_safe(key, value):
         try:
-            if v and str(v).strip() != "" and len(str(v)) < 1500:
-                st.query_params[k] = str(v)
-            elif k in st.query_params:
-                del st.query_params[k]
-        except: pass
+            if value and str(value).strip() and len(str(value)) < 1500:
+                st.query_params[key] = str(value)
+            elif key in st.query_params:
+                del st.query_params[key]
+        except Exception:
+            pass
 
-    groups_str = ",".join(map(str, sel_grp)) if sel_grp else ""
-    gender_str = ",".join(map(str, sel_gen)) if sel_gen else ""
-    loc_str = ",".join(map(str, sel_loc)) if sel_loc else ""
-    ss_str = ",".join(map(str, sel_ss)) if sel_ss else ""
-    
-    set_param_safe("groups", groups_str)
-    set_param_safe("gender", gender_str)
-    set_param_safe("age_min", str(sel_age[0]))
-    set_param_safe("age_max", str(sel_age[1]))
-    set_param_safe("location", loc_str)
-    set_param_safe("ss", ss_str)
-    
-    # Datum Sync nur wenn val definiert ist
+    set_param_safe(
+        "groups",
+        ",".join(map(str, sel_grp)) if sel_grp else "",
+    )
+
+    set_param_safe(
+        "gender",
+        ",".join(map(str, sel_gen)) if sel_gen else "",
+    )
+
+    set_param_safe(
+        "age_min",
+        str(sel_age[0]),
+    )
+
+    set_param_safe(
+        "age_max",
+        str(sel_age[1]),
+    )
+
+    set_param_safe(
+        "location",
+        ",".join(map(str, sel_loc)) if sel_loc else "",
+    )
+
+    set_param_safe(
+        "ss",
+        ",".join(map(str, sel_ss)) if sel_ss else "",
+    )
+
     if date_range_val and isinstance(date_range_val, tuple):
-        set_param_safe("date_start", str(date_range_val[0]))
-        set_param_safe("date_end", str(date_range_val[1]))
-    
-    if has_extra and enable_first_loan_toggle:
-        # Variable first_loan_only könnte hier fehlen wenn nicht im Expander definiert
-        # Wir holen sie sicherheitshalber aus dem State
-        fl_val = st.session_state.get(f"{prefix}_first_loan", False)
-        set_param_safe("first_loan", "1" if fl_val else "")
-
-    if extra_filters_config:
-        for col in extra_filter_keys.keys():
-            vals = st.session_state.get(f"{prefix}_extra_{col}", [])
-            val_str = ",".join(map(str, vals)) if vals else ""
-            set_param_safe(f"ex_{col}", val_str)
-
-    # --- 4. FILTER ANWENDEN ---
-    df_res = df_for_filter.copy()
-    if sel_grp and group_col:
-        df_res = df_res[df_res[group_col].isin(sel_grp)]
-    if sel_gen: df_res = df_res[df_res['Geschlecht_Filter'].isin(sel_gen)]
-    if "Geburtsdatum" in df_res.columns:
-        df_res = df_res[(df_res['Alter_Berechnet'] >= sel_age[0]) & (df_res['Alter_Berechnet'] <= sel_age[1])]
-    if sel_ss: df_res = df_res[df_res['SS_Kategorie'].isin(sel_ss)]
-    if sel_loc and loc_col in df_res.columns:
-        df_res = df_res[df_res[loc_col].isin(sel_loc)]
-    
-    df_extra_res = None
-    if has_extra:
-        df_extra_res = df_extra.copy()
-        # Filter anwenden nur wenn date_range_val ein Tupel ist
-        if enable_date_filter and date_range_val and isinstance(date_range_val, tuple) and date_col_name in df_extra_res.columns:
-            mask = (df_extra_res[date_col_name].dt.date >= date_range_val[0]) & \
-                   (df_extra_res[date_col_name].dt.date <= date_range_val[1])
-            df_extra_res = df_extra_res[mask]
-        
-        if extra_filters_config:
-            for col in extra_filter_keys.keys():
-                vals = st.session_state.get(f"{prefix}_extra_{col}", [])
-                if vals:
-                    df_extra_res = df_extra_res[df_extra_res[col].astype(str).isin(vals)]
-        
-        if enable_first_loan_toggle:
-            fl_val = st.session_state.get(f"{prefix}_first_loan", False)
-            if fl_val and first_loan_col_name in df_extra_res.columns:
-                df_extra_res = df_extra_res[df_extra_res[first_loan_col_name] == True]
-
-        id_col_users = 'Nummer' 
-        id_col_extra = 'Ausleihperson' 
-        if id_col_users in df_res.columns and id_col_extra in df_extra_res.columns:
-            df_res[id_col_users] = df_res[id_col_users].astype(str)
-            df_extra_res[id_col_extra] = df_extra_res[id_col_extra].astype(str)
-            df_extra_res = df_extra_res.merge(df_res[[id_col_users]], left_on=id_col_extra, right_on=id_col_users, how='inner')
-
-    st.sidebar.divider()
-    if show_metrics:
-        text = f"{len(df_res):,}"
-
-        if df_extra_res is not None:
-            text += f" / {len(df_extra_res):,} Transaktionen"
-
-        st.sidebar.caption(
-            f"📊 Ergebnisse: {len(df_res):,}"
-            + (
-                f" / {len(df_extra_res):,} Transaktionen"
-                if df_extra_res is not None else ""
-            )
+        set_param_safe(
+            "date_start",
+            str(date_range_val[0]),
+        )
+        set_param_safe(
+            "date_end",
+            str(date_range_val[1]),
         )
 
-    # Sicherstellen, dass period_mode im Return ist, auch wenn has_extra False (unwahrscheinlich)
-    p_mode = st.session_state.get(mode_key, "Gesamte Daten") if has_extra else "Gesamte Daten"
+    if has_extra and enable_first_loan_toggle:
+        first_loan_value = st.session_state.get(
+            f"{prefix}_first_loan",
+            True,
+        )
+        set_param_safe(
+            "first_loan",
+            "1" if first_loan_value else "",
+        )
 
-    extra_filters = {}
     if extra_filters_config:
         for col in extra_filter_keys:
-            extra_filters[col] = st.session_state.get(f"{prefix}_extra_{col}", [])
+            values = st.session_state.get(
+                extra_filter_keys[col],
+                [],
+            )
+
+            set_param_safe(
+                f"ex_{col}",
+                ",".join(map(str, values)) if values else "",
+            )
+
+    # --------------------------------------------------------
+    # 3. Benutzerfilter anwenden
+    # --------------------------------------------------------
+
+    df_res = df_for_filter.copy()
+
+    if sel_grp and group_col:
+        df_res = df_res[
+            df_res[group_col]
+            .astype(str)
+            .isin([str(v) for v in sel_grp])
+        ]
+
+    if sel_gen:
+        df_res = df_res[
+            df_res["Geschlecht_Filter"]
+            .isin(sel_gen)
+        ]
+
+    if "Geburtsdatum" in df_res.columns:
+        df_res = df_res[
+            df_res["Alter_Berechnet"].between(
+                sel_age[0],
+                sel_age[1],
+            )
+        ]
+
+    if sel_ss:
+        df_res = df_res[
+            df_res["SS_Kategorie"].isin(sel_ss)
+        ]
+
+    if sel_loc and loc_col:
+        df_res = df_res[
+            df_res[loc_col]
+            .astype(str)
+            .isin([str(v) for v in sel_loc])
+        ]
+
+    # --------------------------------------------------------
+    # 4. Ausleihfilter anwenden
+    # --------------------------------------------------------
+
+    df_extra_res = None
+
+    if has_extra:
+        df_extra_res = df_extra.copy()
+
+        if (
+            enable_date_filter
+            and date_range_val
+            and isinstance(date_range_val, tuple)
+            and len(date_range_val) == 2
+            and date_col_name in df_extra_res.columns
+        ):
+            dates = pd.to_datetime(
+                df_extra_res[date_col_name],
+                errors="coerce",
+            )
+
+            mask = (
+                dates.dt.date >= date_range_val[0]
+            ) & (
+                dates.dt.date <= date_range_val[1]
+            )
+
+            df_extra_res = df_extra_res[mask]
+
+        if extra_filter_keys:
+            for col, key_ms in extra_filter_keys.items():
+                values = st.session_state.get(
+                    key_ms,
+                    [],
+                )
+
+                if values and col in df_extra_res.columns:
+                    df_extra_res = df_extra_res[
+                        df_extra_res[col]
+                        .astype(str)
+                        .isin([str(v) for v in values])
+                    ]
+
+        if enable_first_loan_toggle:
+            first_loan_value = st.session_state.get(
+                f"{prefix}_first_loan",
+                True,
+            )
+
+            if (
+                first_loan_value
+                and first_loan_col_name in df_extra_res.columns
+            ):
+                df_extra_res = df_extra_res[
+                    df_extra_res[first_loan_col_name]
+                ]
+
+        # Nur Ausleihen der gefilterten Benutzer behalten
+        if (
+            "Nummer" in df_res.columns
+            and "Ausleihperson" in df_extra_res.columns
+        ):
+            user_ids = (
+                df_res["Nummer"]
+                .dropna()
+                .astype(str)
+                .unique()
+            )
+
+            df_extra_res["Ausleihperson"] = (
+                df_extra_res["Ausleihperson"]
+                .astype(str)
+            )
+
+            df_extra_res = df_extra_res[
+                df_extra_res["Ausleihperson"]
+                .isin(user_ids)
+            ]
+
+    # --------------------------------------------------------
+    # Ergebnisanzeige
+    # --------------------------------------------------------
+
+    st.sidebar.divider()
+
+    if show_metrics:
+        if df_extra_res is not None:
+            st.sidebar.caption(
+                f"📊 Ergebnisse: {len(df_res):,} / "
+                f"{len(df_extra_res):,} Transaktionen"
+            )
+        else:
+            st.sidebar.caption(
+                f"📊 Ergebnisse: {len(df_res):,}"
+            )
+
+    # --------------------------------------------------------
+    # Filter-State
+    # --------------------------------------------------------
+
+    extra_filters = {}
+
+    for col in extra_filter_keys:
+        extra_filters[col] = st.session_state.get(
+            extra_filter_keys[col],
+            [],
+        )
 
     return df_res, df_extra_res, {
-        "groups": sel_grp, 
-        "gender": sel_gen, 
-        "age_range": sel_age, 
-        "locations": sel_loc, 
+        "groups": sel_grp,
+        "gender": sel_gen,
+        "age_range": sel_age,
+        "locations": sel_loc,
         "ss_filter": sel_ss,
-        "date_range": date_range_val, # Immer zurückgeben (kann None sein wenn kein extra)
-        "first_loan_only": st.session_state.get(f"{prefix}_first_loan", False) if has_extra else False,
-        #"period_mode": p_mode,
+        "date_range": date_range_val,
+        "first_loan_only": (
+            st.session_state.get(
+                f"{prefix}_first_loan",
+                True,
+            )
+            if has_extra
+            else False
+        ),
         "group_col": group_col,
         "gender_col": "Geschlecht_Filter",
         "age_col": "Alter_Berechnet",
         "location_col": loc_col,
         "extra_filters": extra_filters,
+        "catalog_filters": catalog_filters,
     }
 
-def apply_filters(df, date_range, selected_zweigstellen, selected_medienarten, selected_benutzergruppen, selected_kategorie_alter, nur_erstausleihen=False):
+
+# ============================================================
+# ALTE FILTERFUNKTION
+# ============================================================
+
+def apply_filters(
+    df,
+    date_range,
+    selected_zweigstellen,
+    selected_medienarten,
+    selected_benutzergruppen,
+    selected_kategorie_alter,
+    nur_erstausleihen=False,
+):
     """
-    Filtert den DataFrame.
-    nur_erstausleihen: Wenn True, werden alle Zeilen entfernt, wo Verlängerung_Anz > 0 ist.
+    Kompatibilitätsfunktion für ältere Seiten.
+
+    Neue Seiten sollten get_sidebar_filters() verwenden.
     """
     if df is None or df.empty:
         return df
-        
+
     filtered = df.copy()
-    
-    # --- NEU: Filter für Verlängerungen ---
+
     if nur_erstausleihen:
         if "Verlängerung_Anz" in filtered.columns:
-            filtered = filtered[filtered["Verlängerung_Anz"] == 0]
-        else:
-            st.warning("Feld 'Verlängerung_Anz' nicht gefunden. Filter kann nicht angewendet werden.")
-    # --------------------------------------
+            numeric = pd.to_numeric(
+                filtered["Verlängerung_Anz"],
+                errors="coerce",
+            ).fillna(0)
 
-    # Datumsfilter
-    if date_range and len(date_range) == 2 and "Ausleihdatum" in filtered.columns:
+            filtered = filtered[numeric == 0]
+        else:
+            st.warning(
+                "Feld 'Verlängerung_Anz' nicht gefunden. "
+                "Filter kann nicht angewendet werden."
+            )
+
+    if (
+        date_range
+        and len(date_range) == 2
+        and "Ausleihdatum" in filtered.columns
+    ):
+        dates = pd.to_datetime(
+            filtered["Ausleihdatum"],
+            errors="coerce",
+        )
+
         start_date = pd.to_datetime(date_range[0])
         end_date = pd.to_datetime(date_range[1])
+
         filtered = filtered[
-            (filtered["Ausleihdatum"] >= start_date)
-            & (filtered["Ausleihdatum"] <= end_date)
+            (dates >= start_date)
+            & (dates <= end_date)
         ]
 
-    # Zweigstelle
-    if selected_zweigstellen and "Zweigstelle" in filtered.columns:
-        filtered = filtered[filtered["Zweigstelle"].astype(str).isin(selected_zweigstellen)]
-        
-    # Medienart
-    if selected_medienarten and "Medienart" in filtered.columns:
-        filtered = filtered[filtered["Medienart"].astype(str).isin(selected_medienarten)]
-        
-    # --- BENUTZERGRUPPE: Dynamische Spaltenwahl ---
-    if selected_benutzergruppen:
-        # Prüfen, ob die gruppierte Spalte existiert (nach apply_group_mapping)
-        if "Benutzergruppe_Gruppiert" in filtered.columns:
-            target_col = "Benutzergruppe_Gruppiert"
-        else:
-            # Fallback auf die Originalspalte, falls Mapping nicht lief
-            target_col = "Benutzergruppe"
-            
-        if target_col in filtered.columns:
-            filtered = filtered[filtered[target_col].astype(str).isin(selected_benutzergruppen)]
-        else:
-            st.warning(f"Spalte {target_col} nicht gefunden.")
-    # -------------------------------------------
+    if (
+        selected_zweigstellen
+        and "Zweigstelle" in filtered.columns
+    ):
+        filtered = filtered[
+            filtered["Zweigstelle"]
+            .astype(str)
+            .isin([str(v) for v in selected_zweigstellen])
+        ]
 
-    # Kategorie Alter
-    if selected_kategorie_alter and "Kategorie Alter" in filtered.columns:
-        filtered = filtered[filtered["Kategorie Alter"].astype(str).isin(selected_kategorie_alter)]
-        
+    if (
+        selected_medienarten
+        and "Medienart" in filtered.columns
+    ):
+        filtered = filtered[
+            filtered["Medienart"]
+            .astype(str)
+            .isin([str(v) for v in selected_medienarten])
+        ]
+
+    if selected_benutzergruppen:
+        target_col = "Benutzergruppe"
+
+        if target_col in filtered.columns:
+            filtered = filtered[
+                filtered[target_col]
+                .astype(str)
+                .isin([str(v) for v in selected_benutzergruppen])
+            ]
+        else:
+            st.warning(
+                f"Spalte '{target_col}' nicht gefunden."
+            )
+
+    if (
+        selected_kategorie_alter
+        and "Kategorie Alter" in filtered.columns
+    ):
+        filtered = filtered[
+            filtered["Kategorie Alter"]
+            .astype(str)
+            .isin([str(v) for v in selected_kategorie_alter])
+        ]
+
     return filtered
+
+
+# ============================================================
+# FILTER-SETTINGS
+# ============================================================
 
 def get_filter_settings(
     date_range,
@@ -516,102 +1260,320 @@ def get_filter_settings(
     sel_medien,
     sel_gruppe,
     sel_alter,
-    nur_erstausleihen
+    nur_erstausleihen,
 ):
-    """
-    Erstellt ein zentrales Filterobjekt.
-    """
+    """Erstellt ein zentrales Filterobjekt."""
     return {
         "date_range": date_range,
         "zweigstelle": sel_zweig,
         "medienart": sel_medien,
         "benutzergruppe": sel_gruppe,
         "alter": sel_alter,
-        "erstausleihen": nur_erstausleihen
+        "erstausleihen": nur_erstausleihen,
     }
 
-def build_filtered_data(data, filtered_users, filtered_loans, filter_state):
-    # Baut alle benötigten Dataframes auf Basis der bereits gefilterten Daten
-    df_users_all = data["users"].copy()
-    df_books_all = data["catalog"].copy()
-    df_smart = data['smartlibrary'].copy()
 
-    df_loans = filtered_loans.copy()
-    df_users = filtered_users.copy()
+# ============================================================
+# GEWÄHLTE KATALOGFILTER AUF KATALOG ANWENDEN
+# ============================================================
 
-    # Ausgeliehene Medien
-    aktive_medien = (
-        df_loans["NR Zugang"]
-        .dropna()
-        .unique()
+def _apply_catalog_filters(df_books, catalog_filters):
+    """Wendet die typisierten Katalogfilter auf den Katalog an."""
+
+    if df_books is None:
+        return pd.DataFrame()
+
+    filtered = df_books.copy()
+
+    # --------------------------------------------------------
+    # Multiselect-Filter
+    # --------------------------------------------------------
+
+    for col, values in catalog_filters.items():
+        if col not in filtered.columns:
+            continue
+
+        if not isinstance(values, list):
+            continue
+
+        if values:
+            filtered = filtered[
+                filtered[col]
+                .astype(str)
+                .isin([str(v) for v in values])
+            ]
+
+    # --------------------------------------------------------
+    # Preis / Range
+    # --------------------------------------------------------
+
+    for col, value in catalog_filters.items():
+        if col not in filtered.columns:
+            continue
+
+        if not isinstance(value, tuple) or len(value) != 2:
+            continue
+
+        # Nur anwenden, wenn es sich um numerische Daten handelt
+        numeric = pd.to_numeric(
+            filtered[col],
+            errors="coerce",
+        )
+
+        if numeric.notna().any():
+            minimum, maximum = value
+
+            filtered = filtered[
+                numeric.between(minimum, maximum)
+            ]
+
+    # --------------------------------------------------------
+    # Datum der Aufnahme
+    # --------------------------------------------------------
+
+    option = catalog_filters.get(
+        "Datum der Aufnahme",
+        "Alle Medien",
     )
-    df_books_used = df_books_all[
-        df_books_all["NR Zugang"]
-        .astype(str)
-        .isin(aktive_medien)
+
+    if (
+        option
+        and option != "Alle Medien"
+        and "Datum der Aufnahme" in filtered.columns
+    ):
+        dates = pd.to_datetime(
+            filtered["Datum der Aufnahme"],
+            errors="coerce",
+        )
+
+        heute = pd.Timestamp.today().normalize()
+
+        if option == "Aktuelles Jahr":
+            filtered = filtered[
+                dates.dt.year == heute.year
+            ]
+
+        elif option == "Letzte 365 Tage":
+            filtered = filtered[
+                dates >= heute - pd.Timedelta(days=365)
+            ]
+
+        elif option == "Letzte 2 Jahre":
+            filtered = filtered[
+                dates >= heute - pd.Timedelta(days=730)
+            ]
+
+    return filtered
+
+
+# ============================================================
+# GESAMTE GEFILTERTE DATEN AUFBAUEN
+# ============================================================
+
+def build_filtered_data(
+    data,
+    filtered_users,
+    filtered_loans,
+    filter_state,
+):
+    """
+    Baut alle benötigten DataFrames auf Basis der Filter auf.
+
+    Wichtig:
+    Katalogfilter werden zuerst auf den Katalog angewendet.
+    Anschliessend werden nur Ausleihen der gefilterten Medien
+    übernommen. Dadurch wirken Lieferant, Preis und
+    Neuanschaffung auch auf Ausleihanalysen.
+    """
+
+    df_users_all = (
+        data.get("users", pd.DataFrame()).copy()
+        if data.get("users") is not None
+        else pd.DataFrame()
+    )
+    df_books_all = (
+        data.get("catalog", pd.DataFrame()).copy()
+        if data.get("catalog") is not None
+        else pd.DataFrame()
+    )
+    df_smart = (
+        data.get("smartlibrary", pd.DataFrame()).copy()
+        if data.get("smartlibrary") is not None
+        else pd.DataFrame()
+    )
+
+    df_loans = (
+        filtered_loans.copy()
+        if filtered_loans is not None
+        else pd.DataFrame()
+    )
+
+    df_users = (
+        filtered_users.copy()
+        if filtered_users is not None
+        else pd.DataFrame()
+    )
+
+    # --------------------------------------------------------
+    # 1. Katalogfilter
+    # --------------------------------------------------------
+
+    catalog_filters = filter_state.get(
+        "catalog_filters",
+        {},
+    )
+
+    df_books_all = _apply_catalog_filters(
+        df_books_all,
+        catalog_filters,
+    )
+
+    # --------------------------------------------------------
+    # 2. Ausleihen auf gefilterte Medien beschränken
+    # --------------------------------------------------------
+
+    if (
+        "NR Zugang" in df_books_all.columns
+        and "NR Zugang" in df_loans.columns
+    ):
+        aktive_medien = set(
+            df_books_all["NR Zugang"]
+            .dropna()
+            .apply(normalize_media_id)
+        )
+
+        df_loans["NR Zugang"] = df_loans["NR Zugang"].astype(str)
+
+        df_loans = df_loans[
+            df_loans["NR Zugang"].apply(normalize_media_id).isin(aktive_medien)
         ]
 
-    #----------------------------------
-    # Ausleihen OHNE Datumsfilter
-    #----------------------------------
+    # --------------------------------------------------------
+    # 3. Ausgeliehene Medien
+    # --------------------------------------------------------
 
-    df_loans_no_date =data['loans'].copy()
+    if (
+        "NR Zugang" in df_books_all.columns
+        and "NR Zugang" in df_loans.columns
+    ):
+        aktive_medien = set(
+            df_loans["NR Zugang"]
+            .dropna()
+            .apply(normalize_media_id)
+        )
 
+        df_books_used = df_books_all[
+            df_books_all["NR Zugang"]
+            .apply(normalize_media_id)
+            .isin(aktive_medien)
+        ].copy()
+    else:
+        df_books_used = df_books_all.iloc[0:0].copy()
 
-    # Nur Benutzer übernehmen,
-    # welche durch die Benutzerfilter übrig bleiben
+    # --------------------------------------------------------
+    # 4. Ausleihen OHNE Datumsfilter
+    # --------------------------------------------------------
 
-    aktive_benutzer = (
-        filtered_users["Nummer"]
-        .dropna()
-        .astype(str)
-        .unique()
+    df_loans_no_date = (
+        data.get("loans", pd.DataFrame()).copy()
+        if data.get("loans") is not None
+        else pd.DataFrame()
     )
 
-    df_loans_no_date["Ausleihperson"] = (
-        df_loans_no_date["Ausleihperson"]
-        .astype(str)
-    )
+    # Nur Benutzer übernehmen, die durch die
+    # Benutzerfilter übrig bleiben.
+    if (
+        "Nummer" in df_users.columns
+        and "Ausleihperson" in df_loans_no_date.columns
+    ):
+        aktive_benutzer = (
+            df_users["Nummer"]
+            .dropna()
+            .astype(str)
+            .unique()
+        )
 
-    df_loans_no_date = df_loans_no_date[
-        df_loans_no_date["Ausleihperson"]
-        .isin(aktive_benutzer)
-    ]
-    extras = filter_state.get("extra_filters", {})
-    if extras.get("Zweigstelle"):
+        df_loans_no_date["Ausleihperson"] = (
+            df_loans_no_date["Ausleihperson"]
+            .astype(str)
+        )
 
         df_loans_no_date = df_loans_no_date[
-            df_loans_no_date["Zweigstelle"]
-            .astype(str)
-            .isin(extras["Zweigstelle"])
+            df_loans_no_date["Ausleihperson"]
+            .isin(aktive_benutzer)
         ]
-    if extras.get("Medienart"):
 
-        df_loans_no_date = df_loans_no_date[
-            df_loans_no_date["Medienart"]
-            .astype(str)
-            .isin(extras["Medienart"])
-        ]
-    if extras.get("Kategorie Alter"):
+    # --------------------------------------------------------
+    # 5. Ausleihfilter OHNE Datumsfilter
+    # --------------------------------------------------------
 
-        df_loans_no_date = df_loans_no_date[
-            df_loans_no_date["Kategorie Alter"]
-            .astype(str)
-            .isin(extras["Kategorie Alter"])
-        ]
+    extras = filter_state.get(
+        "extra_filters",
+        {},
+    )
+
+    for col, values in extras.items():
+        if (
+            values
+            and col in df_loans_no_date.columns
+        ):
+            df_loans_no_date = df_loans_no_date[
+                df_loans_no_date[col]
+                .astype(str)
+                .isin([str(v) for v in values])
+            ]
+
     if filter_state.get("first_loan_only", False):
+        if (
+            "Erstausleihe" not in df_loans_no_date.columns
+            and "Verlängerung_Anz" in df_loans_no_date.columns
+        ):
+            extension_count = pd.to_numeric(
+                df_loans_no_date["Verlängerung_Anz"].replace("", pd.NA),
+                errors="coerce",
+            ).fillna(0)
+            df_loans_no_date["Erstausleihe"] = extension_count == 0
 
         if "Erstausleihe" in df_loans_no_date.columns:
-
             df_loans_no_date = df_loans_no_date[
                 df_loans_no_date["Erstausleihe"]
             ]
+
+    # --------------------------------------------------------
+    # 6. Katalogfilter ebenfalls auf loans_no_date anwenden
+    # --------------------------------------------------------
+
+    if (
+        "NR Zugang" in df_books_all.columns
+        and "NR Zugang" in df_loans_no_date.columns
+    ):
+        aktive_medien = set(
+            df_books_all["NR Zugang"]
+            .dropna()
+            .apply(normalize_media_id)
+        )
+
+        df_loans_no_date["NR Zugang"] = (
+            df_loans_no_date["NR Zugang"]
+            .astype(str)
+        )
+
+        df_loans_no_date = df_loans_no_date[
+            df_loans_no_date["NR Zugang"]
+            .apply(normalize_media_id)
+            .isin(aktive_medien)
+        ]
+
+    # --------------------------------------------------------
+    # 7. Rückgabe
+    # --------------------------------------------------------
+
     return {
         "loans": df_loans,
-        "loans_no_date": df_loans_no_date,# ohne Datumsfilter
-        "users": df_users, # passend zu loans
-        "users_all": df_users_all , #kompletter Benutzerbestand
+        "loans_no_date": df_loans_no_date,
+        "users": df_users,
+        "users_all": df_users_all,
         "books": df_books_all,
-        "books_used": df_books_used, #nur ausgeliehene Medien
-        "smart": df_smart
+        "books_used": df_books_used,
+        "smart": df_smart,
     }

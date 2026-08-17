@@ -3,7 +3,7 @@ import pandas as pd
 import altair as alt
 import numpy as np
 
-from src.filters import get_sidebar_filters
+from src.filters import get_sidebar_filters, build_filtered_data
 from components.ui import show_media_detail, kpi_box
 from src.bestand_analysis import berechne_bestand_mit_reihen
 
@@ -65,43 +65,78 @@ if "Kategorie Alter" not in df_loans.columns and "Kategorie Alter_catalog" in df
 # FILTER
 # =====================================================
 
-extra_filters_config = [
-    {"label": "📍 Standort", "col": "Standort(1)", "default":[]},
-    {"label": "📚 Medienart", "col": "Medienart", "default":[]},
-    {"label": "👶 Lesealter", "col": "Kategorie Alter", "default":[0]},
+erste_medienart_default = []
+if df_books is not None and "Medienart" in df_books.columns:
+    medienart_counts = (
+        df_books["Medienart"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .loc[lambda s: s != ""]
+        .value_counts()
+    )
+    if not medienart_counts.empty:
+        erste_medienart_default = [medienart_counts.index[0]]
+
+medienart_filter_key = "bestand_catalog_Medienart"
+if (
+    erste_medienart_default
+    and "bestand_default_medienart_initialized" not in st.session_state
+):
+    st.session_state.setdefault(medienart_filter_key, erste_medienart_default)
+    st.session_state["bestand_default_medienart_initialized"] = True
+
+catalog_filters_config = [
+    {"label": "📍 Standort", "col": "Standort(1)", "type": "multiselect", "default": []},
+    {"label": "📚 Medienart", "col": "Medienart", "type": "multiselect", "default": erste_medienart_default},
+    {"label": "🎯 Lesealter", "col": "Kategorie Alter", "type": "multiselect", "default": []},
 ]
 
-# Filter anwenden, hier keine Zeitfilter, da nicht relevant
-
-_, df_loans_filtered, filter_info = get_sidebar_filters(
-    df_users=None,
+filtered_users, df_loans_filtered, filter_info = get_sidebar_filters(
+    df_users=pd.DataFrame(),
     df_extra=df_loans,
+    df_catalog=df_books,
     prefix="bestand",
     enable_date_filter=False,
     date_col_name="Ausleihdatum",
-    extra_filters_config=extra_filters_config,
+    catalog_filters_config=catalog_filters_config,
     enable_first_loan_toggle=False,
-    show_metrics=False
+    show_metrics=False,
+    expander_defaults={
+        "target": False,
+        "loans": False,
+        "catalog": True,
+    },
 )
+
+filtered_data = build_filtered_data(
+    data=data,
+    filtered_users=filtered_users,
+    filtered_loans=df_loans_filtered,
+    filter_state=filter_info,
+)
+
+df_books_filtered = filtered_data["books"]
+df_loans_filtered = filtered_data["loans_no_date"]
 
 # Aktuellen Filterzustand merken
 aktueller_filterzustand = tuple(
     (
-        conf['col'],
-        tuple(sorted(st.session_state.get(f"bestand_extra_{conf['col']}", [])))
+        conf["col"],
+        tuple(sorted(st.session_state.get(f"bestand_catalog_{conf['col']}", [])))
     )
-    for conf in extra_filters_config
+    for conf in catalog_filters_config
 )
 
 # Hat sich seit dem letzten Run etwas geändert?
-alter_filterzustand = st.session_state.get('bestand_filterzustand')
+alter_filterzustand = st.session_state.get("bestand_filterzustand")
 
 if (
     alter_filterzustand is not None
     and alter_filterzustand != aktueller_filterzustand
 ):
-    st.session_state['bestand_suche']=""
-st.session_state['bestand_filterzustand']=aktueller_filterzustand
+    st.session_state["bestand_suche"] = ""
+st.session_state["bestand_filterzustand"] = aktueller_filterzustand
 
 key = "NR Zugang"
 
@@ -119,15 +154,7 @@ if key not in df_books.columns:
 df_bestand_full = berechne_bestand_mit_reihen(df_books, df_loans)
 
 
-df_bestand = df_bestand_full.copy()
-
-if extra_filters_config:
-    for conf in extra_filters_config:
-        spalte = conf["col"]
-        werte = st.session_state.get(f"bestand_extra_{spalte}", [])
-
-        if werte and spalte in df_bestand.columns:
-            df_bestand = df_bestand[df_bestand[spalte].astype(str).isin(werte)]
+df_bestand = berechne_bestand_mit_reihen(df_books_filtered, df_loans_filtered)
 
 
 # Metrik für die Sidebar
@@ -181,9 +208,9 @@ with col2:
         # Zeigt an, welche Filterwerte konkret in die gewählte Basis einfliessen -
         # gerade bei "lokal" sonst nicht auf den ersten Blick ersichtlich.
         aktive_filter_texte = []
-        for conf in extra_filters_config:
+        for conf in catalog_filters_config:
             spalte = conf["col"]
-            werte = st.session_state.get(f"bestand_extra_{spalte}", [])
+            werte = st.session_state.get(f"bestand_catalog_{spalte}", [])
             if werte:
                 aktive_filter_texte.append(f"{conf['label']}: {', '.join(map(str, werte))}")
 
