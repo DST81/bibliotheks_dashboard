@@ -26,12 +26,21 @@ import subprocess
 import sys
 import os
 import re
+from pathlib import Path
 
 load_dotenv()
 # ToDo: Stichtag rauslöschen im Live-Betrieb
 STICHTAG_VERSCHIEBUNG_TAGE = 30   # Echtbetrieb =0
 library_context = get_library_context()
 BIBLIOTHEK = library_context["library_name"]
+
+def _get_cached_library_logo(cache_dir):
+    cache_dir = Path(cache_dir)
+    for pattern in ["library_logo.png", "library_logo.jpg", "library_logo.jpeg", "library_logo.webp", "library_logo.gif"]:
+        logo_path = cache_dir / pattern
+        if logo_path.exists():
+            return logo_path
+    return None
 
 st.set_page_config(
     page_title=f"Bibliothek {BIBLIOTHEK} - Dashboard",
@@ -41,9 +50,11 @@ st.set_page_config(
 
 col1, col2 = st.columns([3,2])
 with col1:
-    title_with_icon(f"Bibliothek {BIBLIOTHEK} – Dashboard", BUCH)
+    title_with_icon(f"Dashboard {BIBLIOTHEK}", BUCH)
     st.caption("Statusüberblick und strategische Kennzahlen")
 
+with col2:
+    logo_placeholder = st.empty()
 
 # Daten aktualisieren
 st.sidebar.subheader("Daten neuladen")
@@ -201,6 +212,13 @@ df_users = data.get("users")
 df_smartlibrary = data.get("smartlibrary", pd.DataFrame())
 df_preferences = data.get("preferences", pd.DataFrame())
 data_dates = data.get("dates", {}) # Die Datums-Infos holen
+
+logo_path = _get_cached_library_logo(library_context["cache_dir"])
+if logo_path:
+    with logo_placeholder.container():
+        logo_spacer, logo_col = st.columns([1, 0.85])
+        with logo_col:
+            st.image(str(logo_path), width=300)
 
 # --- NEU: Zentrale Datenstand-Anzeige ---
 # Wir sammeln alle verfügbaren Datenstände in einer Liste

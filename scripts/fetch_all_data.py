@@ -3,6 +3,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -279,6 +280,49 @@ def save_cache(layout_name, records):
 
     print(f"  ✅ Gespeichert: {filename} ({len(records)} Datensätze)")
 
+def download_library_logo(records, base_url, token):
+    if not records:
+        return
+
+    logo_url = None
+    for record in records:
+        value = record.get("fieldData", {}).get("Logo(1)")
+        if value and str(value).strip():
+            logo_url = str(value).strip()
+            break
+
+    if not logo_url:
+        return
+
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        response = requests.get(logo_url, headers=headers, timeout=30)
+        response.raise_for_status()
+    except Exception as exc:
+        print(f"  ⚠️  Logo konnte nicht geladen werden: {exc}")
+        return
+
+    content_type = response.headers.get("Content-Type", "").lower()
+    parsed_path = urlparse(logo_url).path.lower()
+    if "png" in content_type or parsed_path.endswith(".png"):
+        suffix = ".png"
+    elif "gif" in content_type or parsed_path.endswith(".gif"):
+        suffix = ".gif"
+    elif "webp" in content_type or parsed_path.endswith(".webp"):
+        suffix = ".webp"
+    else:
+        suffix = ".jpg"
+
+    for old_logo in CACHE_DIR.glob("library_logo.*"):
+        try:
+            old_logo.unlink()
+        except Exception:
+            pass
+
+    logo_path = CACHE_DIR / f"library_logo{suffix}"
+    logo_path.write_bytes(response.content)
+    print(f"  ✅ Logo gespeichert: {logo_path.name}")
+
 def archive_old_cache_files():
     """
     Bereinigt den Cache-Ordner:
@@ -412,6 +456,8 @@ if __name__ == "__main__":
 
             # Speichern
             save_cache(layout, records)
+            if layout == "Voreinstellungen":
+                download_library_logo(records, base_url, token)
             print(f"  ✅ Fertig für '{layout}': {len(records)} Datensätze.")
             print("-" * 30)
 
