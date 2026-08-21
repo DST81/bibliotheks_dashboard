@@ -1,7 +1,8 @@
 import altair as alt
+from src.theme import COLOR_LOANS
 
 
-def sortierter_balken(df, x_col, y_col, x_label, y_label, color="#4C78A8", height=380):
+def sortierter_balken(df, x_col, y_col, x_label, y_label, color=COLOR_LOANS, height=380):
     """Balkendiagramm mit absteigend nach Wert sortierter x-Achse."""
     return (
         alt.Chart(df)

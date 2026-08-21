@@ -1,0 +1,28 @@
+from pathlib import Path
+
+ICON_DIR = Path("assets")
+
+HOME = ICON_DIR/"home.svg"
+DASHBOARD = ICON_DIR/"dashboard.svg"
+AUSLEIHE = ICON_DIR/"ausleihe.svg"
+RUECKGABE = ICON_DIR/"rueckgabe.svg"
+BUCH = ICON_DIR/"buch.svg"
+ANALYSE = ICON_DIR/"analyse.svg"
+APP = ICON_DIR/"app_user.svg"
+USER = ICON_DIR/"benutzer.svg"
+BESTAND = ICON_DIR/"bestand.svg"
+CALENDAR = ICON_DIR/"calendar.svg"
+NEW_USER = ICON_DIR/"neue_benutzer.svg"
+OPEN = ICON_DIR/"offene_ausleihen.svg"
+PDF = ICON_DIR/"pdf.svg"
+STANDORT = ICON_DIR/"standort.svg"
+VERGLECH = ICON_DIR/"vergleich.svg"
+ANTIQUARIAT = ICON_DIR/"antiquariat.svg"
+CHECK = ICON_DIR/"check.svg"
+DATENAKTUALISIERUNG = ICON_DIR/"datenaktualisierung.svg"
+EINSTELLUNGEN = ICON_DIR/"einstellungen.svg"
+KOSTEN = ICON_DIR/"kosten.svg"
+TOP = ICON_DIR/"top_medien.svg"
+ZIELGRUPPE = ICON_DIR/"zielgruppe.svg"
+MAP = ICON_DIR/"map.svg"
+SCATTER = ICON_DIR/"scatter.svg"

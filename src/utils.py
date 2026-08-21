@@ -97,6 +97,8 @@ def get_library_context():
         if query_access_key in key_to_library:
             library_id = key_to_library[query_access_key]
             authenticated = True
+            if "access_key" in st.query_params:
+                del st.query_params["access_key"]
         elif require_access_key:
             st.error("Kein gueltiger Dashboard-Zugriff.")
             st.stop()
@@ -120,7 +122,7 @@ def get_library_context():
         "library_name": os.getenv(f"DASHBOARD_LIBRARY_NAME_{library_id.upper()}", library_id),
         "cache_dir": cache_dir,
         "authenticated": authenticated,
-        "_access_key": query_access_key,
+        #"_access_key": query_access_key,
     }
     st.session_state["library_context"] = context
     return context

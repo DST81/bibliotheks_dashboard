@@ -10,9 +10,13 @@ warnings.filterwarnings('ignore')
 
 from src.utils import load_data, load_swiss_locations, validate_and_clean_locations, run_validation_pipeline, load_shapefile_cached
 from src.filters import get_sidebar_filters
+from src.theme import CARD_BG, GENDER_COLORS
+from components.ui import title_with_icon
+from components.icons import NEW_USER, MAP
 
-st.set_page_config(page_title="Benutzer Analyse", page_icon="👥", layout="wide")
-st.title("👥 Benutzer- und Zielgruppenanalyse")
+st.set_page_config(page_title="Benutzer Analyse", page_icon="assets/neue_benutzer.svg", layout="wide")
+title_with_icon("Benutzer- und Zielgruppenanalyse", NEW_USER)
+
 
 # ==============================================================================
 # 1. DATEN AUS SESSION_STATE HOLEN (WICHTIG!)
@@ -85,7 +89,7 @@ group_col = filter_info['group_col']
 # 2. DEMOGRAFISCHE ANALYSE (2x2 Layout)
 # ==============================================================================
 
-st.subheader("Demografische Übersicht")
+#st.subheader("Demografische Übersicht")
 
 # Zeile 1: Benutzergruppe & Wohnort
 c1, c2 = st.columns(2)
@@ -284,10 +288,10 @@ with c4:
                 names="Geschlecht",
                 color="Geschlecht",
                 color_discrete_map={
-                    "Weiblich": "#D66D75",    # Gedecktes Rosenholz / Terra (wirkt erwachsen & warm)
-                    "Männlich": "#5D8AA8",    # Luftiges Schieferblau (passt zu den blauen Plots)
-                    "Andere": "#B0B0B0",  # Mittleres Grau
-                    "Unbekannt": "#E0E0E0" # Helles Grau
+                    "Weiblich": GENDER_COLORS["Weiblich"],
+                    "Männlich": GENDER_COLORS["Männlich"],
+                    "Andere": GENDER_COLORS["Andere"],
+                    "Unbekannt": GENDER_COLORS["Unbekannt"]
                 },
                 hole=0.4,
                 height=300
@@ -297,8 +301,8 @@ with c4:
                 textposition='inside', 
                 textinfo='percent+label', 
                 textfont_size=12,
-                textfont_color="#ffffff", # Weisse Schrift für besseren Kontrast auf den dunkleren Tönen
-                marker=dict(line=dict(color='#ffffff', width=2))
+                textfont_color=CARD_BG,
+                marker=dict(line=dict(color=CARD_BG, width=2))
             )
             
             fig.update_layout(
@@ -355,7 +359,7 @@ mask_unknown = df_complete['Ort_Match_Status'] == STATUS_UNKNOWN
 # 4. KARTE DER NUTZER:INNEN
 # ==============================================================================
 st.divider()
-st.subheader("🗺️ NutzerInnen nach Wohngemeinde")
+title_with_icon("Nutzende nach Wohngemeinde", MAP, icon_size=34, level="subheader")
 
 # ... (Der Rest des Codes für Referenzdaten und Shapefile bleibt gleich wie unten) ...
 # 1. Referenzdaten für Hauptgemeinde-Logik laden
@@ -542,95 +546,113 @@ except Exception as e:
 # ==============================================================================
 # 6. DATENQUALITÄT
 # ==============================================================================
-
-st.subheader("Datenqualität")
-
 STATUS_OK = '✅ OK'
 STATUS_CORRECTED_LIST = ['⚠️ Korrigiert', '⚠️ Ort korrigiert', '⚠️ PLZ korrigiert']
 STATUS_UNKNOWN = '❌ Unbekannt'
 
-# Unvollständigkeit prüfen
-mask_incomplete = (
-    df_filtered['PLZ'].isna() | 
-    (df_filtered['PLZ'].astype(str).str.strip() == '') | 
+# Unvollständigkeit vorab prüfen, damit der Expander nur bei Handlungsbedarf offen ist.
+mask_incomplete_preview = (
+    df_filtered['PLZ'].isna() |
+    (df_filtered['PLZ'].astype(str).str.strip() == '') |
     (df_filtered['PLZ'].astype(str).str.lower() == 'nan') |
-    df_filtered['Wohnort'].isna() | 
+    df_filtered['Wohnort'].isna() |
     (df_filtered['Wohnort'].astype(str).str.strip() == '') |
     (df_filtered['Wohnort'].astype(str).str.lower() == 'nan')
 )
-count_incomplete = mask_incomplete.sum()
+df_complete_preview = df_filtered[~mask_incomplete_preview]
+has_quality_problems = (
+    mask_incomplete_preview.any()
+    or (
+        "Ort_Match_Status" in df_complete_preview.columns
+        and (df_complete_preview["Ort_Match_Status"] == STATUS_UNKNOWN).any()
+    )
+)
 
-# Match Status prüfen
-df_complete = df_filtered[~mask_incomplete].copy()
+with st.expander("Datenqualität", expanded=has_quality_problems):
+    st.subheader("Datenqualität")
 
-mask_ok = df_complete['Ort_Match_Status'] == STATUS_OK
-count_ok = mask_ok.sum()
+    # Unvollständigkeit prüfen
+    mask_incomplete = (
+        df_filtered['PLZ'].isna() | 
+        (df_filtered['PLZ'].astype(str).str.strip() == '') | 
+        (df_filtered['PLZ'].astype(str).str.lower() == 'nan') |
+        df_filtered['Wohnort'].isna() | 
+        (df_filtered['Wohnort'].astype(str).str.strip() == '') |
+        (df_filtered['Wohnort'].astype(str).str.lower() == 'nan')
+    )
+    count_incomplete = mask_incomplete.sum()
 
-mask_corrected = df_complete['Ort_Match_Status'].isin(STATUS_CORRECTED_LIST)
-count_corr = mask_corrected.sum()
+    # Match Status prüfen
+    df_complete = df_filtered[~mask_incomplete].copy()
 
-mask_unknown = df_complete['Ort_Match_Status'] == STATUS_UNKNOWN
-count_unknown = mask_unknown.sum()
+    mask_ok = df_complete['Ort_Match_Status'] == STATUS_OK
+    count_ok = mask_ok.sum()
 
-total_users = len(df_filtered)
-match_rate = ((count_ok + count_corr) / total_users * 100) if total_users > 0 else 0
+    mask_corrected = df_complete['Ort_Match_Status'].isin(STATUS_CORRECTED_LIST)
+    count_corr = mask_corrected.sum()
 
-# Metriken anzeigen
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("✅ Zugeordnet", f"{count_ok + count_corr:,}", f"{match_rate:.1f}%")
-c2.metric("🛠️ Korrigiert", f"{count_corr:,}", "Automatisch bereinigt")
+    mask_unknown = df_complete['Ort_Match_Status'] == STATUS_UNKNOWN
+    count_unknown = mask_unknown.sum()
 
-if count_unknown > 0:
-    c3.metric("❌ Fehlerhaft", f"{count_unknown:,}", "Unbekannter Ort", delta_color="inverse")
-else:
-    c3.metric("❌ Fehlerhaft", "0", "-")
+    total_users = len(df_filtered)
+    match_rate = ((count_ok + count_corr) / total_users * 100) if total_users > 0 else 0
 
-if count_incomplete > 0:
-    c4.metric("⚪ Unvollständig", f"{count_incomplete:,}", "Kein Ort/PLZ", delta_color="inverse")
-else:
-    c4.metric("⚪ Unvollständig", "0", "-")
+    # Metriken anzeigen
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("✅ Zugeordnet", f"{count_ok + count_corr:,}", f"{match_rate:.1f}%")
+    c2.metric("🛠️ Korrigiert", f"{count_corr:,}", "Automatisch bereinigt")
 
-# Details zur Datenqualität (Einblendbar)
-if count_unknown > 0 or count_incomplete > 0 or count_corr > 0:
-    with st.expander("📋 Details zur Datenqualität anzeigen"):
-        tabs = []
-        if count_unknown > 0: tabs.append("❌ Fehlerhafte Orte")
-        if count_incomplete > 0: tabs.append("⚪ Fehlende Daten")
-        if count_corr > 0: tabs.append("🛠️ Autom. Korrekturen")
-        
-        if tabs:
-            panes = st.tabs(tabs)
-            idx = 0
+    if count_unknown > 0:
+        c3.metric("❌ Fehlerhaft", f"{count_unknown:,}", "Unbekannter Ort", delta_color="inverse")
+    else:
+        c3.metric("❌ Fehlerhaft", "0", "-")
+
+    if count_incomplete > 0:
+        c4.metric("⚪ Unvollständig", f"{count_incomplete:,}", "Kein Ort/PLZ", delta_color="inverse")
+    else:
+        c4.metric("⚪ Unvollständig", "0", "-")
+
+    # Details zur Datenqualität (Einblendbar)
+    if count_unknown > 0 or count_incomplete > 0 or count_corr > 0:
+        with st.expander("📋 Details zur Datenqualität anzeigen"):
+            tabs = []
+            if count_unknown > 0: tabs.append("❌ Fehlerhafte Orte")
+            if count_incomplete > 0: tabs.append("⚪ Fehlende Daten")
+            if count_corr > 0: tabs.append("🛠️ Autom. Korrekturen")
             
-            if count_unknown > 0:
-                with panes[idx]:
-                    st.warning(f"**{count_unknown}** Datensätze haben eine ungültige PLZ/Ort-Kombination.")
-                    df_problems = df_complete[mask_unknown]
-                    df_problems['Kombi'] = df_problems['PLZ'].astype(str) + " | " + df_problems['Wohnort'].astype(str)
-                    top_errors = df_problems['Kombi'].value_counts().head(10).reset_index()
-                    top_errors.columns = ["Eingegebene Kombination", "Anzahl"]
-                    st.dataframe(top_errors, hide_index=True, use_container_width=True)
-                    st.info("💡 **Ursache:** Tippfehler oder Ausland. Bitte in BiThek korrigieren.")
-                idx += 1
+            if tabs:
+                panes = st.tabs(tabs)
+                idx = 0
+                
+                if count_unknown > 0:
+                    with panes[idx]:
+                        st.warning(f"**{count_unknown}** Datensätze haben eine ungültige PLZ/Ort-Kombination.")
+                        df_problems = df_complete[mask_unknown]
+                        df_problems['Kombi'] = df_problems['PLZ'].astype(str) + " | " + df_problems['Wohnort'].astype(str)
+                        top_errors = df_problems['Kombi'].value_counts().head(10).reset_index()
+                        top_errors.columns = ["Eingegebene Kombination", "Anzahl"]
+                        st.dataframe(top_errors, hide_index=True, use_container_width=True)
+                        st.info("💡 **Ursache:** Tippfehler oder Ausland. Bitte in BiThek korrigieren.")
+                    idx += 1
 
-            if count_incomplete > 0:
-                with panes[idx]:
-                    st.info(f"**{count_incomplete}** Datensätze haben keine PLZ oder keinen Wohnort.")
-                    m_plz = df_filtered[mask_incomplete & (df_filtered['PLZ'].isna() | (df_filtered['PLZ'].astype(str).str.strip() == ''))].shape[0]
-                    m_ort = df_filtered[mask_incomplete & (df_filtered['Wohnort'].isna() | (df_filtered['Wohnort'].astype(str).str.strip() == ''))].shape[0]
-                    cm1, cm2 = st.columns(2)
-                    cm1.metric("Davon ohne PLZ", m_plz)
-                    cm2.metric("Davon ohne Wohnort", m_ort)
-                    st.info("💡 **Ursache:** Oft Testaccounts oder unvollständige Registrierung.")
-                    st.caption("Empfehlung: Stammdaten in BiThek nachpflegen.")
-                idx += 1
+                if count_incomplete > 0:
+                    with panes[idx]:
+                        st.info(f"**{count_incomplete}** Datensätze haben keine PLZ oder keinen Wohnort.")
+                        m_plz = df_filtered[mask_incomplete & (df_filtered['PLZ'].isna() | (df_filtered['PLZ'].astype(str).str.strip() == ''))].shape[0]
+                        m_ort = df_filtered[mask_incomplete & (df_filtered['Wohnort'].isna() | (df_filtered['Wohnort'].astype(str).str.strip() == ''))].shape[0]
+                        cm1, cm2 = st.columns(2)
+                        cm1.metric("Davon ohne PLZ", m_plz)
+                        cm2.metric("Davon ohne Wohnort", m_ort)
+                        st.info("💡 **Ursache:** Oft Testaccounts oder unvollständige Registrierung.")
+                        st.caption("Empfehlung: Stammdaten in BiThek nachpflegen.")
+                    idx += 1
 
-            if count_corr > 0:
-                with panes[idx]:
-                    st.success(f"**{count_corr}** Einträge wurden automatisch bereinigt.")
-                    df_corr = df_complete[mask_corrected][['PLZ', 'Wohnort', 'Ort_Validiert']].drop_duplicates().head(15)
-                    st.dataframe(df_corr.rename(columns={"Wohnort": "Original", "Ort_Validiert": "Korrektur"}), hide_index=True, use_container_width=True)
-                    st.caption("Empfehlung: Stammdaten in BiThek nachpflegen.")
-else:
-    st.divider()
-    st.success("🎉 Perfekte Datenqualität! Alle Nutzer wurden erfolgreich zugeordnet.")
+                if count_corr > 0:
+                    with panes[idx]:
+                        st.success(f"**{count_corr}** Einträge wurden automatisch bereinigt.")
+                        df_corr = df_complete[mask_corrected][['PLZ', 'Wohnort', 'Ort_Validiert']].drop_duplicates().head(15)
+                        st.dataframe(df_corr.rename(columns={"Wohnort": "Original", "Ort_Validiert": "Korrektur"}), hide_index=True, use_container_width=True)
+                        st.caption("Empfehlung: Stammdaten in BiThek nachpflegen.")
+    else:
+        st.divider()
+        st.success("🎉 Perfekte Datenqualität! Alle Nutzer wurden erfolgreich zugeordnet.")

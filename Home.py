@@ -9,7 +9,19 @@ from src.utils import load_data, load_swiss_locations, validate_and_clean_locati
 from src.filters import get_sidebar_filters, build_filtered_data
 from src.pdf_report import build_report_pdf
 from src.report_helpers import build_home_filter_summary, format_pdf_delta
-from components.ui import kpi_box
+from src.theme import (
+    SUCCESS,
+    DANGER,
+    MUTED,
+    COLOR_LOANS,
+    COLOR_APP,
+    COLOR_RETURNS,
+    COLOR_VISITS,
+    COLOR_COMPARE_A,
+    COLOR_PREVIOUS,
+)
+from components.icons import BUCH, DASHBOARD, PDF, DATENAKTUALISIERUNG, BESTAND, ANTIQUARIAT, USER, OPEN, EINSTELLUNGEN
+from components.ui import kpi_box, title_with_icon
 import subprocess
 import sys
 import os
@@ -18,19 +30,21 @@ import re
 load_dotenv()
 # ToDo: Stichtag rauslöschen im Live-Betrieb
 STICHTAG_VERSCHIEBUNG_TAGE = 30   # Echtbetrieb =0
-BIBLIOTHEK = os.getenv("FILEMAKER_DATABASE")
-
-st.set_page_config(
-    page_title=f"Bibliothek {BIBLIOTHEK} - Dashboard",
-    page_icon="📚",
-    layout="wide"
-)
-
 library_context = get_library_context()
 BIBLIOTHEK = library_context["library_name"]
 
-st.title(f"📚 Bibliothek {BIBLIOTHEK} – Leitungs-Dashboard")
-st.caption("Statusüberblick und strategische Kennzahlen")
+st.set_page_config(
+    page_title=f"Bibliothek {BIBLIOTHEK} - Dashboard",
+    page_icon="assets/buch.svg",
+    layout="wide"
+)
+
+col1, col2 = st.columns([3,2])
+with col1:
+    title_with_icon(f"Bibliothek {BIBLIOTHEK} – Dashboard", BUCH)
+    st.caption("Statusüberblick und strategische Kennzahlen")
+
+
 # Daten aktualisieren
 st.sidebar.subheader("Daten neuladen")
 if st.sidebar.button(
@@ -39,7 +53,7 @@ if st.sidebar.button(
     help="Laedt alle Daten neu aus dem Bibliothekssystem. Dies dauert einige Minuten."
 ):
 
-    with st.spinner("Daten werden aktualisiert... \n\nDies kann 4-5 Minuten dauern"):
+    with st.spinner("Daten werden aktualisiert... \n\nDies kann 5-10 Minuten dauern"):
         fetch_env = os.environ.copy()
         fetch_env["DASHBOARD_LIBRARY_ID"] = library_context["library_id"]
         fetch_env["DASHBOARD_CACHE_DIR"] = str(library_context["cache_dir"])
@@ -167,16 +181,14 @@ if metadata:
 
         details.append({
             "Datenquelle": labels[key],
-            "Import": fetch if status == "loaded" else "-",
             "Status": "✓ geladen" if status == "loaded"
                       else status_labels.get(status, status),
+            "Import": fetch if status == "loaded" else "-",
         })
 
-
-    # Detailinformationen
-    with st.expander(f"🕒 Letzte Datenaktualisierung · Datenstand {datenstand}"):
-        col1,col2 = st.columns([0.1,2])
-        with col2:
+    with col2:
+        # Detailinformationen
+        with st.expander(f"🕒 Letzte Datenaktualisierung · Datenstand {datenstand}"):  
             st.dataframe(
                 pd.DataFrame(details),
                 hide_index=True,
@@ -228,15 +240,15 @@ filtered_users, filtered_loans, filter_state = get_sidebar_filters(
 
     extra_filters_config=[
         {
-            "col": "Zweigstelle",
+            "col": "Zweigstelle_loan",
             "label": "Zweigstelle"
         },
         {
-            "col": "Medienart",
+            "col": "Medienart_loan",
             "label": "Medienart"
         },
         {
-            "col": "Kategorie Alter",
+            "col": "Kategorie Alter_loan",
             "label": "Kategorie Alter"
         }
     ]
@@ -525,11 +537,11 @@ with rechts:
 
         def farbe_veraenderung(val):
             if val > 0:
-                return "color: green; font-weight: bold;"
+                return f"color: {SUCCESS}; font-weight: bold;"
             elif val < 0:
-                return "color: red; font-weight: bold;"
+                return f"color: {DANGER}; font-weight: bold;"
             else:
-                return "color: grey;"
+                return f"color: {MUTED};"
 
 
         styled_table = (
@@ -600,6 +612,36 @@ def _find_branch_col(df):
         if name in {"zweigstelle", "filiale", "standort", "bibliothek"}:
             return col
     return None
+
+
+def _filter_smartlibrary_visits(df_smart, df_users_filtered):
+    smart = df_smart.copy() if df_smart is not None else pd.DataFrame()
+    if smart.empty:
+        return smart
+
+    if "Nummer" in smart.columns:
+        smart["Nummer"] = (
+            smart["Nummer"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+    if (
+        "Nummer" in smart.columns
+        and df_users_filtered is not None
+        and "Nummer" in df_users_filtered.columns
+    ):
+        active_users = (
+            df_users_filtered["Nummer"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .unique()
+        )
+        smart = smart[smart["Nummer"].isin(active_users)]
+
+    return smart
 
 
 
@@ -734,11 +776,16 @@ if "Transaktion(1)" in df_ausleihe.columns:
     )
 else:
     df_ausleihe["Ausleihkanal"] = "Theke"
+
+home_extra_kpis = {}
+home_openlibrary_kpis = {}
+
 # =====================================================
 # Ausleihtrend aktuelles Jahr
 # =====================================================
 
-st.subheader("📈 Ausleihtrend aktuelles Jahr")
+title_with_icon(f"Ausleihtrend {aktuelles_jahr}",DASHBOARD, icon_size=34, level="subheader")
+
 
 home_trend_chart = None
 
@@ -912,7 +959,7 @@ if "Ausleihdatum" in df_ausleihe.columns:
 
     kanal_scale = alt.Scale(
         domain=["Theke", "App"],
-        range=["#4C78A8", "#F58518"]
+        range=[COLOR_LOANS, COLOR_APP]
     )
     zeitraum_scale = alt.Scale(
         domain=["Aktuell", "Vorjahr"],
@@ -974,10 +1021,16 @@ if "Ausleihdatum" in df_ausleihe.columns:
     # --------------------------------------------------
     col0, col1,col1_2, col2,col2_2, col3 = st.columns([0.5,1,1,1,1,2])
 
-    col1.markdown("🟦 **Theke**")
-    col1_2.markdown("🟧 **App**")
-    col2.markdown(f"""<span style="color:#5c78a4;"><strong>━</strong></span> <strong> Kumulierte Ausleihen {aktuelles_jahr}<strong>""",unsafe_allow_html=True)
-    col2_2.markdown(f"""<span style="color:#df8a39;"><strong>- - -</strong></span> <strong>Kumulierte Ausleihen {vorjahr}<strong>""",unsafe_allow_html=True)
+    col1.markdown(
+        f"""<span style="color:{COLOR_LOANS};"><strong>■</strong></span> <strong>Theke</strong>""",
+        unsafe_allow_html=True,
+    )
+    col1_2.markdown(
+        f"""<span style="color:{COLOR_APP};"><strong>■</strong></span> <strong>App</strong>""",
+        unsafe_allow_html=True,
+    )
+    col2.markdown(f"""<span style="color:{COLOR_COMPARE_A};"><strong>━</strong></span> <strong> Kumulierte Ausleihen {aktuelles_jahr}<strong>""",unsafe_allow_html=True)
+    col2_2.markdown(f"""<span style="color:{COLOR_PREVIOUS};"><strong>- - -</strong></span> <strong>Kumulierte Ausleihen {vorjahr}<strong>""",unsafe_allow_html=True)
 
     chart_line = (
         alt.Chart(line)
@@ -999,7 +1052,7 @@ if "Ausleihdatum" in df_ausleihe.columns:
                 title="Gesamtausleihen",
                 scale=alt.Scale(
                     domain=["Aktuelles Jahr","Vorjahr"],
-                    range=["#D62728","#888888"]
+                    range=[COLOR_COMPARE_A, COLOR_PREVIOUS]
                 ),
                 legend=None
             ),
@@ -1091,8 +1144,20 @@ if "Ausleihdatum" in df_ausleihe.columns:
         ausleihen_delta/ ausleihen_vorjahr *100
         if ausleihen_vorjahr > 0 else 0
     )
+    home_extra_kpis = {
+        "App-Anteil": (
+            f"{app_quote:.1f} %"
+            + f"\n{vorjahr}: {app_quote_vorjahr:.1f} %"
+            + f"\n{app_delta:+.1f} Prozentpunkte"
+        ),
+        f"Aktuelle Ausleihen bis {heute.strftime('%d.%m.')}": (
+            f"{ausleihen_aktuell:,}".replace(",", "'")
+            + f"\n{vorjahr}: {ausleihen_vorjahr:,}".replace(",", "'")
+            + f"\n{format_pdf_delta(ausleihen_aktuell, ausleihen_vorjahr)}"
+        ),
+    }
     with col1:
-        farbe = "#2E7D32" if app_delta >= 0 else "#C62828"
+        farbe = SUCCESS if app_delta >= 0 else DANGER
         symbol = "🟢" if app_delta >= 0 else "🔴"
 
         kpi_box(
@@ -1105,7 +1170,7 @@ if "Ausleihdatum" in df_ausleihe.columns:
         )
 
     with col2:
-        farbe = "#2E7D32" if veraenderung >= 0 else "#C62828"
+        farbe = SUCCESS if veraenderung >= 0 else DANGER
         symbol = "🟢" if veraenderung >= 0 else "🔴"
         kpi_box(
             f"📚 Aktuelle Ausleihen bis {heute.strftime("%d.%B")}",
@@ -1119,24 +1184,35 @@ if "Ausleihdatum" in df_ausleihe.columns:
 else:
     st.write("Keine Daten vorhanden")
 
+has_smartlibrary_data = (
+    df_smartlibrary is not None
+    and not df_smartlibrary.empty
+    and "erstellt" in df_smartlibrary.columns
+)
 
-st.subheader("Zutritte und Rückgaben seit letzter bedienter Öffnungszeit")
+if has_smartlibrary_data:
+    # --------------------------------------------------
+    # OpenLibrary aktueller Stand seit letztes BEDIENTEN ÖFFNUNG
+    # --------------------------------------------------
+    st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+    st.subheader("OpenLibrary-Aktivitäten seit letzter bedienter Öffnungszeit")
 
-if df_preferences is None or df_preferences.empty:
+if has_smartlibrary_data and (df_preferences is None or df_preferences.empty):
     st.info(
         "Noch keine Voreinstellungen im Cache gefunden. "
         "Nach dem nächsten Datenabruf wird das Layout `Voreinstellungen` mitgeladen."
     )
-else:
+elif has_smartlibrary_data:
     returns_base = filtered_df_no_date.copy()
+    smart_base = _filter_smartlibrary_visits(df_smartlibrary, filtered_users)
     latest_candidates = []
     if "Rückgabedatum" in returns_base.columns:
         latest_candidates.append(pd.to_datetime(returns_base["Rückgabedatum"], errors="coerce").max())
-    if df_smartlibrary is not None and not df_smartlibrary.empty and "erstellt" in df_smartlibrary.columns:
-        latest_candidates.append(pd.to_datetime(df_smartlibrary["erstellt"], errors="coerce").max())
+    if not smart_base.empty and "erstellt" in smart_base.columns:
+        latest_candidates.append(pd.to_datetime(smart_base["erstellt"], errors="coerce").max())
     latest_candidates = [value for value in latest_candidates if pd.notna(value)]
     default_now = max(latest_candidates) if latest_candidates else pd.Timestamp.now()
-
+    # Sobald produktiv-Daten drin sind,kann das weggelassen oder allenfalls weniger populär noch versteckt sein
     with st.expander("Test-Zeitpunkt", expanded=False):
         col_date, col_time = st.columns(2)
         with col_date:
@@ -1154,6 +1230,7 @@ else:
 
     now = pd.Timestamp(datetime.combine(test_date, test_time))
     branch_col = "Zweigstelle_loan" if "Zweigstelle_loan" in returns_base.columns else "Zweigstelle"
+    smart_branch_col = _find_branch_col(smart_base)
     branches = (
         returns_base[branch_col].dropna().astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()
         if branch_col in returns_base.columns
@@ -1168,8 +1245,10 @@ else:
             workload_rows.append({
                 "Zweigstelle": branch,
                 "Seit": "nicht erkannt",
+                "App-Ausleihen": np.nan,
                 "App-Rückgaben": np.nan,
                 "Zutritte": np.nan,
+                "Beobachtungstage": np.nan,
                 "Hinweis": "Öffnungszeitenfeld nicht erkannt",
             })
             continue
@@ -1193,7 +1272,44 @@ else:
         )
         app_returns = returns[app_return_mask].copy()
 
-        smart = df_smartlibrary.copy() if df_smartlibrary is not None else pd.DataFrame()
+        loan_dates = pd.to_datetime(
+            returns.get("Ausleihdatum"),
+            errors="coerce"
+        )
+        loan_timestamps= pd.to_datetime(
+            returns.get("erstellt"),
+            errors = "coerce"
+        )
+        # Sicherheitscheck: "erstellt" nur verwenden, wenn das Datum zum Ausleihdatum passt
+        valid_loan_timestamp = (
+            loan_timestamps.notna()
+            & loan_dates.notna()
+            & (loan_timestamps.dt.normalize()==loan_dates.dt.normalize())
+        )
+
+        loan_timestamps = loan_timestamps.where(valid_loan_timestamp)
+
+        loan_channel = (
+            returns.get(
+                "Transaktion(1)",
+                pd.Series("", index=returns.index)
+            )
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        app_loan_mask = (
+            (loan_timestamps >= last_opening)
+            & (loan_timestamps <= now)
+            & loan_channel.str.startswith("App", na=False)
+        )
+
+        app_loans = returns[app_loan_mask].copy()
+
+        smart = smart_base.copy()
+        if smart_branch_col in smart.columns and branch != "Gesamt":
+            smart = smart[smart[smart_branch_col].astype(str).str.strip().eq(str(branch))]
         if not smart.empty and "erstellt" in smart.columns:
             smart["erstellt"] = pd.to_datetime(smart["erstellt"], errors="coerce")
             visits = smart[
@@ -1219,134 +1335,207 @@ else:
         workload_rows.append({
             "Zweigstelle": branch,
             "Seit": f"{wochentag}, {last_opening.strftime('%d.%m.%Y %H:%M')}",
+            "App-Ausleihen": len(app_loans),
             "App-Rückgaben": len(app_returns),
             "Zutritte": visit_count,
+            "Beobachtungstage": max((now - last_opening).total_seconds() / 86400, 0),
             "Hinweis": f"{source_col or ''}; Zeitfeld: {timestamp_source or 'nur Datum'}",
         })
 
     workload = pd.DataFrame(workload_rows)
-    c1, c2, c3 = st.columns(3)
+
+    # Numerische Werte bereinigen
+    for col in ["App-Ausleihen", "App-Rückgaben", "Zutritte", "Beobachtungstage"]:
+        workload[col] = pd.to_numeric(
+            workload[col],
+            errors="coerce"
+        ).fillna(0)
+
+    # Prüfen, ob überhaupt Aktivität vorhande ist
+    has_worklaod = (
+        workload[
+            ["App-Ausleihen", "App-Rückgaben", "Zutritte"]
+        ].sum().sum()>0
+    )
+
+    total_app_loans = int(workload["App-Ausleihen"].sum())
+    total_app_returns = int(workload["App-Rückgaben"].sum())
+    total_visits = int(workload["Zutritte"].sum())
+    total_observation_days = workload["Beobachtungstage"].sum()
+    loans_per_visit = (
+        total_app_loans / total_visits
+        if total_visits > 0
+        else 0
+    )
+    returns_per_visit = (
+        total_app_returns / total_visits
+        if total_visits > 0
+        else 0
+    )
+    visits_per_day = (
+        total_visits / total_observation_days
+        if total_observation_days > 0
+        else 0
+    )
+    home_openlibrary_kpis = {
+        "OpenLibrary App-Ausleihen": (
+            f"{total_app_loans:,}".replace(",", "'")
+            + f"\n{loans_per_visit:.2f} Ausleihen / Zutritt"
+        ),
+        "OpenLibrary App-Rückgaben": (
+            f"{total_app_returns:,}".replace(",", "'")
+            + f"\n{returns_per_visit:.2f} Rückgaben / Zutritt"
+        ),
+        "OpenLibrary Zutritte": (
+            f"{total_visits:,}".replace(",", "'")
+            + f"\n{visits_per_day:.1f} Zutritte / Tag"
+        ),
+    }
+
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
-        kpi_box("App-Rückgaben", int(pd.to_numeric(workload["App-Rückgaben"], errors="coerce").fillna(0).sum()))
+        kpi_box(
+            "App-Ausleihen",
+            total_app_loans,
+            subtext=f"{loans_per_visit:.2f} Ausleihen / Zutritt",
+        )
     with c2:
-        kpi_box("Zutritte", int(pd.to_numeric(workload["Zutritte"], errors="coerce").fillna(0).sum()))
+        kpi_box(
+            "App-Rückgaben",
+            total_app_returns,
+            subtext=f"{returns_per_visit:.2f} Rückgaben / Zutritt",
+        )
     with c3:
+        kpi_box(
+            "Zutritte",
+            total_visits,
+            subtext=f"{visits_per_day:.1f} Zutritte / Tag",
+        )
+    with c4:
         recognized = workload["Seit"].ne("nicht erkannt").sum()
         kpi_box("Zweigstellen erkannt", f"{recognized}/{len(workload)}")
-    st.markdown("<br>", unsafe_allow_html=True)
-    # Plot-Daten je Zweigstelle vorbereiten
-    workload_plot = workload.copy()
 
-    workload_plot["App-Rückgaben"] = pd.to_numeric(
-        workload_plot["App-Rückgaben"],
-        errors="coerce"
-    ).fillna(0)
+    if has_worklaod:
+        st.markdown("<br>", unsafe_allow_html=True)
+        # Plot-Daten je Zweigstelle vorbereiten
+        workload_plot = workload.copy()
 
-    workload_plot["Zutritte"] = pd.to_numeric(
-        workload_plot["Zutritte"],
-        errors="coerce"
-    ).fillna(0)
+        workload_plot["App-Ausleihen"] = pd.to_numeric(
+            workload_plot["App-Ausleihen"],
+            errors="coerce"
+        ).fillna(0)
 
-    # Für Altair ins Long-Format bringen
-    workload_long = workload_plot.melt(
-        id_vars=["Zweigstelle"],
-        value_vars=["App-Rückgaben", "Zutritte"],
-        var_name="Kennzahl",
-        value_name="Anzahl",
-    )
+        workload_plot["App-Rückgaben"] = pd.to_numeric(
+            workload_plot["App-Rückgaben"],
+            errors="coerce"
+        ).fillna(0)
 
-    # Sortierung nach gesamter Arbeitslast
-    branch_order = (
-        workload_plot
-        .assign(
-            Gesamt=workload_plot["App-Rückgaben"] + workload_plot["Zutritte"]
+        workload_plot["Zutritte"] = pd.to_numeric(
+            workload_plot["Zutritte"],
+            errors="coerce"
+        ).fillna(0)
+
+        # Für Altair ins Long-Format bringen
+        workload_long = workload_plot.melt(
+            id_vars=["Zweigstelle"],
+            value_vars=["App-Ausleihen","App-Rückgaben", "Zutritte"],
+            var_name="Kennzahl",
+            value_name="Anzahl",
         )
-        .sort_values("Gesamt", ascending=False)["Zweigstelle"]
-        .tolist()
-    )
 
-    workload_chart = (
-        alt.Chart(workload_long)
-        .mark_bar(
-            cornerRadiusEnd=6,
-            height=18,
+        # Sortierung nach gesamter Arbeitslast
+        branch_order = (
+            workload_plot
+            .assign(
+                Gesamt=workload_plot["App-Ausleihen"] + workload_plot["App-Rückgaben"] + workload_plot["Zutritte"]
+            )
+            .sort_values("Gesamt", ascending=False)["Zweigstelle"]
+            .tolist()
         )
-        .encode(
-            y=alt.Y(
-                "Zweigstelle:N",
-                title=None,
-                sort=branch_order,
-                axis=alt.Axis(
-                    labelFontSize=13,
-                    labelLimit=220,
+
+        workload_chart = (
+            alt.Chart(workload_long)
+            .mark_bar(
+                cornerRadiusEnd=6,
+                height=18,
+            )
+            .encode(
+                y=alt.Y(
+                    "Zweigstelle:N",
+                    title=None,
+                    sort=branch_order,
+                    axis=alt.Axis(
+                        labelFontSize=13,
+                        labelLimit=220,
+                    ),
                 ),
-            ),
-            x=alt.X(
-                "Anzahl:Q",
-                title="Anzahl seit letzter bedienter Öffnungszeit",
-                axis=alt.Axis(
-                    grid=True,
-                    tickMinStep=1,
+                x=alt.X(
+                    "Anzahl:Q",
+                    title="Anzahl seit letzter bedienter Öffnungszeit",
+                    axis=alt.Axis(
+                        grid=True,
+                        tickMinStep=1,
+                    ),
                 ),
-            ),
-            yOffset=alt.YOffset("Kennzahl:N"),
-            color=alt.Color(
-                "Kennzahl:N",
-                title=None,
-                scale=alt.Scale(
-                    domain=["App-Rückgaben", "Zutritte"],
-                    range=["#E76F51", "#2A9D8F"],
+                yOffset=alt.YOffset("Kennzahl:N"),
+                color=alt.Color(
+                    "Kennzahl:N",
+                    title=None,
+                    scale=alt.Scale(
+                        domain=["App-Ausleihen","App-Rückgaben", "Zutritte"],
+                        range=[COLOR_LOANS, COLOR_RETURNS, COLOR_VISITS],
+                    ),
                 ),
-            ),
-            tooltip=[
-                alt.Tooltip("Zweigstelle:N", title="Zweigstelle"),
-                alt.Tooltip("Kennzahl:N", title="Kennzahl"),
-                alt.Tooltip("Anzahl:Q", title="Anzahl", format=",.0f"),
-            ],
+                tooltip=[
+                    alt.Tooltip("Zweigstelle:N", title="Zweigstelle"),
+                    alt.Tooltip("Kennzahl:N", title="Kennzahl"),
+                    alt.Tooltip("Anzahl:Q", title="Anzahl", format=",.0f"),
+                ],
+            )
         )
-    )
 
-    workload_labels = (
-        alt.Chart(workload_long)
-        .mark_text(
-            align="left",
-            baseline="middle",
-            dx=5,
-            fontSize=12,
-            fontWeight="bold",
+        workload_labels = (
+            alt.Chart(workload_long)
+            .mark_text(
+                align="left",
+                baseline="middle",
+                dx=5,
+                fontSize=12,
+                fontWeight="bold",
+            )
+            .encode(
+                y=alt.Y(
+                    "Zweigstelle:N",
+                    sort=branch_order,
+                ),
+                yOffset=alt.YOffset("Kennzahl:N"),
+                x=alt.X("Anzahl:Q"),
+                text=alt.Text("Anzahl:Q", format=",.0f"),
+                detail="Kennzahl:N",
+            )
         )
-        .encode(
-            y=alt.Y(
-                "Zweigstelle:N",
-                sort=branch_order,
-            ),
-            yOffset=alt.YOffset("Kennzahl:N"),
-            x=alt.X("Anzahl:Q"),
-            text=alt.Text("Anzahl:Q", format=",.0f"),
-            detail="Kennzahl:N",
+
+        chart_height = max(180, len(branch_order) * 65)
+        
+        st.altair_chart(
+            (workload_chart + workload_labels)
+            .properties(height=chart_height)
+            .configure_view(strokeWidth=0),
+            use_container_width=True,
         )
-    )
 
-    chart_height = max(180, len(branch_order) * 65)
-
-    st.altair_chart(
-        (workload_chart + workload_labels)
-        .properties(height=chart_height)
-        .configure_view(strokeWidth=0),
-        use_container_width=True,
-    )
-
-    st.dataframe(
-        workload.drop(columns=["Hinweis"], errors="ignore"),
-        use_container_width=True,
-        hide_index=True,
-    )
-    st.caption(
-        "Rückgaben verwenden das Ausleihe-Feld `geändert` als Zeitstempel, wenn dessen Datum dem Rückgabedatum entspricht."
-    )
+        st.dataframe(
+            workload.drop(columns=["Hinweis"], errors="ignore"),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.caption(
+            "Rückgaben verwenden das Ausleihe-Feld `geändert` als Zeitstempel, wenn dessen Datum dem Rückgabedatum entspricht."
+        )
 
 st.divider()
-st.subheader("📄 Bericht exportieren")
+title_with_icon("Bericht exportieren", PDF,icon_size=34, level="subheader")
+
 st.caption(
     "Erstellt einen kompakten PDF-Bericht mit den wichtigsten Kennzahlen, "
     "aktiven Filtern und dem Ausleihtrend der Startseite."
@@ -1375,6 +1564,14 @@ if st.button("📄 PDF erstellen", key="home_pdf_erstellen_button"):
                 + f"\n{format_pdf_delta(new_users, new_users_old)}"
             ),
         }
+        home_kpis.update(home_extra_kpis)
+
+        home_kpi_sections = []
+        if home_openlibrary_kpis:
+            home_kpi_sections.append((
+                "Aktuelle Arbeitslast OpenLibrary",
+                home_openlibrary_kpis,
+            ))
 
         home_charts = []
         if home_trend_chart is not None:
@@ -1386,7 +1583,7 @@ if st.button("📄 PDF erstellen", key="home_pdf_erstellen_button"):
         if not offene_medienart.empty:
             offene_chart = (
                 alt.Chart(offene_medienart.head(10))
-                .mark_bar(color="#4C78A8")
+                .mark_bar(color=COLOR_LOANS)
                 .encode(
                     x=alt.X("Offen:Q", title="Offene Ausleihen"),
                     y=alt.Y("Medienart:N", title="Medienart", sort="-x"),
@@ -1401,10 +1598,12 @@ if st.button("📄 PDF erstellen", key="home_pdf_erstellen_button"):
             home_charts.append(("Offene Ausleihen nach Medienart", offene_chart))
 
         report = build_report_pdf(
-            title=f"Bibliothek {BIBLIOTHEK} - Leitungsbericht",
-            subtitle=f"Kompakter Statusbericht der Startseite für {aktuelles_jahr}.",
+            title=f"Bibliothek {BIBLIOTHEK}",
+            subtitle=f"Kompakter Statusbericht {aktuelles_jahr}.",
             kpis=home_kpis,
             filters=build_home_filter_summary(filter_state),
+            kpi_title=f"Kennzahlen {aktuelles_jahr}",
+            kpi_sections=home_kpi_sections,
             charts=home_charts,
         )
 
@@ -1422,67 +1621,3 @@ if st.button("📄 PDF erstellen", key="home_pdf_erstellen_button"):
         mime="application/pdf",
     )
 
-
-
-# =========================================================================
-# 🛡️ KOMPAKTER DATENQUALITÄTS-HINWEIS (Nur Ampel-Funktion)
-# =========================================================================
-
-# Da df_users jetzt schon validiert ist, können wir direkt die Spalten nutzen
-if df_users is not None and 'Ort_Match_Status' in df_users.columns:
-    STATUS_OK = '✅ OK'
-    STATUS_CORRECTED_LIST = ['⚠️ Korrigiert', '⚠️ Ort korrigiert', '⚠️ PLZ korrigiert']
-    
-    mask_incomplete = (
-        df_users['PLZ'].isna() | (df_users['PLZ'].astype(str).str.strip() == '') |
-        df_users['Wohnort'].isna() | (df_users['Wohnort'].astype(str).str.strip() == '')
-    )
-    count_incomplete = mask_incomplete.sum()
-    
-    df_complete = df_users[~mask_incomplete]
-    count_ok = (df_complete['Ort_Match_Status'] == STATUS_OK).sum()
-    count_corr = df_complete['Ort_Match_Status'].isin(STATUS_CORRECTED_LIST).sum()
-    count_unknown = (df_complete['Ort_Match_Status'] == '❌ Unbekannt').sum()
-    
-    total = len(df_users)
-    good_rate = ((count_ok + count_corr) / total * 100) if total > 0 else 0
-    
-    problem_count = count_unknown + count_incomplete
-    has_quality_issues = problem_count > 0
-
-    st.divider()
-    if has_quality_issues:
-        st.warning(
-            f"⚠️ Datenqualität Benutzer: {problem_count:,} problematische Einträge. "
-            "Details und Bereinigung auf der Seite Benutzer."
-        )
-
-    with st.expander(
-        "📊 Datenqualität Benutzer",
-        expanded=has_quality_issues
-    ):
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Zugeordnete Orte", f"{good_rate:.1f}%")
-        c2.metric("Problematische Einträge", f"{problem_count:,}")
-
-        if has_quality_issues:
-            c3.metric("Handlungsbedarf", "Ja", delta_color="inverse")
-            st.info(
-                f"Es liegen **{count_unknown}** fehlerhafte Orte und "
-                f"**{count_incomplete}** unvollständige Datensätze vor. "
-                "Die Detailprüfung ist auf der Seite **👥 Benutzer**."
-            )
-        else:
-            c3.metric("Handlungsbedarf", "Nein", delta_color="off")
-            st.success("✅ Alle Benutzerdaten sind vollständig und korrekt zugeordnet.")
-
-# =========================================================================
-# Kurzer Hinweis zu anderen Datenqualitäts-Problemen (Optional)
-# =========================================================================
-# Wenn du auch Medienart/Gruppen-Probleme kurz anzeigen willst:
-col_grp_raw = df_users['Benutzergruppe'].astype(str) if df_users is not None else pd.Series()
-grp_issues = col_grp_raw.nunique() - col_grp_raw.str.strip().nunique() if len(col_grp_raw) > 0 else 0
-
-if grp_issues > 0:
-    with st.expander("ℹ️ Weitere Datenqualitätshinweise", expanded=False):
-        st.info(f"Es wurden **{grp_issues}** Inkonsistenzen in den Benutzergruppen gefunden (z.B. durch Leerzeichen). Details siehe Seite **👥 Benutzer**.")

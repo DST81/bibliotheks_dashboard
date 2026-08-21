@@ -410,10 +410,16 @@ def berechne_reihenkonsistenz(df_bestand: pd.DataFrame) -> pd.DataFrame:
                     )
 
             else:
-                if abs(diff) > ABWEICHUNGS_SCORE:
+                if diff > ABWEICHUNGS_SCORE:
                     hinweis = (
-                        f"ℹ️ Nutzung dieses Bandes weicht deutlich "
-                        f"vom Rest der Reihe ab "
+                        f"⚠️ Dieses Band wird deutlich schwächer genutzt "
+                        f"als der Rest der Reihe "
+                        f"(Median {median_score:.0f})."
+                    )
+                elif diff < -ABWEICHUNGS_SCORE:
+                    hinweis = (
+                        f"⭐ Dieses Band wird deutlich besser genutzt "
+                        f"als der Rest der Reihe "
                         f"(Median {median_score:.0f})."
                     )
                 else:

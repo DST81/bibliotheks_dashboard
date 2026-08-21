@@ -15,11 +15,15 @@ from src.report_helpers import (
     format_delta,
     format_pdf_delta,
 )
-from components.ui import kpi_box, show_new_acquisition_detail
+from components.ui import kpi_box, show_new_acquisition_detail, title_with_icon
+from components.icons import KOSTEN, PDF
+from src.theme import COLOR_LOANS, COLOR_NEUTRAL
 
-st.set_page_config(page_title="Medien Analyse", page_icon="📚", layout="wide")
 
-st.title("Medien Analyse")
+st.set_page_config(page_title="Medien Analyse", page_icon="assets/kosten.svg", layout="wide")
+
+title_with_icon("Neuanschaffungen und Beschaffungskosten", KOSTEN)
+
 
 # --------------------------------------------------------
 # Prüfen, ob Daten geladen wurden
@@ -45,21 +49,19 @@ filtered_users, filtered_loans, filter_state = get_sidebar_filters(
     enable_date_filter=True,
     enable_first_loan_toggle=True,
     extra_filters_config=[
-        {"col": "Zweigstelle", "label": "Zweigstelle"},
+        {"col": "Zweigstelle_loan", "label": "Zweigstelle"},
     ],
     catalog_filters_config=[
         {"col": "Lieferant", "label": "Lieferant", "type": "multiselect"},
         {"col": "Preis", "label": "Preis", "type": "range", "currency": True, "step": 5.0},
-        {
-            "col": "Datum der Aufnahme",
-            "label": "Neuanschaffung",
-            "type": "date_preset",
-            "default": "Aktuelles Jahr",
-        },
+        {"col": "Datum der Aufnahme","label": "Neuanschaffung","type": "date_preset","default": "Aktuelles Jahr"},
         {"col": "Sprache(1)", "label": "Sprache", "type": "multiselect"},
         {"col": "Medienart", "label": "Medienart", "type": "multiselect"},
         {"col": "Kategorie Alter", "label": "Lesealter", "type": "multiselect"},
         {"col": "Standort(1)", "label": "Standort", "type": "multiselect"},
+        {"label": "🏷️ Themenbereich", "col": "Themenbereich", "type": "multiselect", "default": []},
+        {"label": "🔖 Signatur Klartext", "col": "Signatur Klartext", "type": "multiselect", "default": []},
+        {"label": "🔖 Signatur", "col": "Signatur(1)", "type": "multiselect", "default": []},
     ],
     expander_defaults={
         "target": False,
@@ -85,11 +87,6 @@ df_books_used = filtered_data['books_used']
 # ============================================================
 # 💰 NEUANSCHAFFUNGEN – DATEN VORBEREITEN (für alle Tabs)
 # ============================================================
-st.header("💰 Neuanschaffungen und Beschaffungskosten")
-st.caption(
-    "Auswertung der gefilterten Katalogmedien nach Lieferant, "
-    "Preis und Ausleihnutzung"
-)
 
 required_new_cols = {"NR Zugang", "Titel", "Lieferant", "Preis", "Datum der Aufnahme"}
 missing_new_cols = required_new_cols - set(df_katalog.columns)
@@ -222,6 +219,11 @@ with kpi5:
         color=delta_color(durchschnittliche_ausleihen, kpis_vorjahr["avg_loans"]),
     )
 
+st.markdown("<br>", unsafe_allow_html=True)  
+st.subheader(
+    "Auswertung der gefilterten Katalogmedien nach Lieferant, "
+    "Preis und Ausleihnutzung"
+)
 # Lieferanten-Basisliste (wird vom Scatterplot-Filter gebraucht;
 # die volle Auswertung nach Lieferant liefert Tab "Vergleiche").
 alle_lieferanten = sorted(df_new["Lieferant"].dropna().astype(str).unique().tolist())
@@ -453,25 +455,25 @@ with tab_vergleich:
     # --------------------------------------------------------
     # VERGLEICHSTABELLE
     # --------------------------------------------------------
-    st.subheader("📋 Detailvergleich")
+    with st.expander("Detailvergleich"):
 
-    tabelle = vergleich.copy()
-    tabelle["Kosten"] = tabelle["Kosten"].round(2)
-    tabelle["Durchschnittspreis"] = tabelle["Durchschnittspreis"].round(2)
-    tabelle["Ausleihen pro Medium"] = tabelle["Ausleihen pro Medium"].round(1)
-    tabelle["Ausleihen pro CHF 100"] = tabelle["Ausleihen pro CHF 100"].round(1)
+        tabelle = vergleich.copy()
+        tabelle["Kosten"] = tabelle["Kosten"].round(2)
+        tabelle["Durchschnittspreis"] = tabelle["Durchschnittspreis"].round(2)
+        tabelle["Ausleihen pro Medium"] = tabelle["Ausleihen pro Medium"].round(1)
+        tabelle["Ausleihen pro CHF 100"] = tabelle["Ausleihen pro CHF 100"].round(1)
 
-    tabelle = tabelle.rename(
-        columns={
-            "Vergleich": dimension_label.split(" ", 1)[-1],
-            "Kosten": "Kosten (CHF)",
-            "Durchschnittspreis": "Ø Preis (CHF)",
-            "Ausleihen pro Medium": "Ø Ausleihen / Medium",
-            "Ausleihen pro CHF 100": "Ausleihen / CHF 100",
-        }
-    )
+        tabelle = tabelle.rename(
+            columns={
+                "Vergleich": dimension_label.split(" ", 1)[-1],
+                "Kosten": "Kosten (CHF)",
+                "Durchschnittspreis": "Ø Preis (CHF)",
+                "Ausleihen pro Medium": "Ø Ausleihen / Medium",
+                "Ausleihen pro CHF 100": "Ausleihen / CHF 100",
+            }
+        )
 
-    st.dataframe(tabelle, use_container_width=True, hide_index=True)
+        st.dataframe(tabelle, use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -613,7 +615,7 @@ with tab_jahresvergleich:
                 xOffset="Jahr:N",
                 y=alt.Y(f"{kennzahl_jv}:Q", title=achsen_titel_jv[kennzahl_jv], aggregate="sum"),
                 color=alt.Color(
-                    "Jahr:N", scale=alt.Scale(range=["#B0B8C1", "#4C78A8"]), title="Jahr"
+                    "Jahr:N", scale=alt.Scale(range=[COLOR_NEUTRAL, COLOR_LOANS]), title="Jahr"
                 ),
                 tooltip=[
                     alt.Tooltip(f"{dimension_spalte_jv}:N", title=dimension_label_jv.split(" ", 1)[-1]),
@@ -636,7 +638,8 @@ with tab_jahresvergleich:
 # 📄 PDF-EXPORT
 # ============================================================
 st.divider()
-st.subheader("📄 Bericht exportieren")
+title_with_icon("Bericht exportieren", PDF,icon_size=34, level="subheader")
+
 st.caption(
     "Erstellt ein PDF mit den aktuellen Kennzahlen sowie dem Lieferanten-, "
     "Vergleichs- und Jahresvergleich-Diagramm (berücksichtigt Ihre aktuelle "

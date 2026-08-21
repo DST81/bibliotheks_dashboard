@@ -2,15 +2,26 @@ import streamlit as st
 import json
 from pathlib import Path
 import os
+from html import escape
 import pandas as pd
 import numpy as np
 import altair as alt
 
-from components.ui import kpi_box
+from components.ui import kpi_box, title_with_icon
+from components.icons import APP, OPEN, CALENDAR
 from src.filters import get_sidebar_filters
+from src.theme import (
+    SUCCESS,
+    DANGER,
+    COLOR_LOANS,
+    COLOR_VISITS,
+    COLOR_HOLIDAY,
+    COLOR_WEEKDAYS,
+    TEXT,
+)
 
 
-st.set_page_config(page_title="Open-Library-Zutritte", page_icon="📲", layout="wide")
+st.set_page_config(page_title="Open-Library-Zutritte", page_icon="assets/app_user.svg", layout="wide")
 
 # --- 1. Konfiguration laden ---
 CONFIG_PATH = Path("data/config.json")
@@ -332,7 +343,7 @@ durchschnitt_pro_monat = round(monate.mean(), 1)
 
 col1, col2=st.columns([3,1])
 with col1:
-    st.title("📲 OpenLibrary Zutritte")
+    title_with_icon("OpenLibrary Zutritte", APP, icon_size=38)
 
 with col2:
     kpi_box("📅 Zeitraum",zeitraum, suffix= "Tage")
@@ -344,7 +355,7 @@ with abo_col1:
     kpi_box("🔑 Aktive OpenLibrary-Abos",anzahl_aktiv,previous=anzahl_open_abos,previous_label="Total registrierte:")
 
 with abo_col2:
-    farbe = "#C62828" if quote_abgelaufen > 10 else "#2E7D32"
+    farbe = DANGER if quote_abgelaufen > 10 else SUCCESS
     kpi_box("⚠️ Abgelaufene Abos",anzahl_abgelaufen,previous=f"{quote_abgelaufen:.1f} %",previous_label="Anteil",color=farbe)
 
 st.markdown("<br>", unsafe_allow_html=True)
@@ -353,7 +364,7 @@ nutzung_col1, nutzung_col2, nutzung_col3, c1,c2,c3 = st.columns(6)
 
 with nutzung_col1:
     kpi_box(
-        "🏛️ Total Zutritte im Zeitraum",
+        "🏛️ Zutritte im Zeitraum",
         gesamt_zutritte,
         previous=durchschnitt,
         previous_label="Zutritte pro Tag",
@@ -361,7 +372,7 @@ with nutzung_col1:
 
 with nutzung_col2:
     kpi_box(
-        "👤 Total Besucher im Zeitraum",
+        "👤 Besucher im Zeitraum",
         anzahl_besucher,
         previous=zutritte_pro_besucher,
         previous_label="Zutritte / Besucher",
@@ -377,13 +388,13 @@ with nutzung_col3:
 
 
 with c1:
-    kpi_box("📈 Ø Zutritte / Tag",durchschnitt,previous="-")
+    kpi_box("📈 Ø Zutritte / Tag",durchschnitt)
 
 with c2:
-    kpi_box("📅 Ø / Woche",durchschnitt_pro_woche,previous="-")
+    kpi_box("📅 Ø / Woche",durchschnitt_pro_woche)
 
 with c3:
-    kpi_box("🗓️ Ø / Monat",durchschnitt_pro_monat,previous="-")
+    kpi_box("🗓️ Ø / Monat",durchschnitt_pro_monat)
 
 st.markdown("<br>", unsafe_allow_html=True)  
 
@@ -424,7 +435,8 @@ if not df_open.empty:
 # ZUTRITTE / AUSLEIHEN PRO WOCHE
 # =====================================================
 
-st.subheader("📈 Zutritte und Ausleihen nach Kalenderwoche")
+title_with_icon("Zutritte und Ausleihen nach Kalenderwoche", OPEN, icon_size=34, level="subheader")
+
 
 
 df_open["Wochentag"] = pd.Categorical(
@@ -542,7 +554,7 @@ for f in ferien:
             "Ferien": f["name"],
             "start": wochen["Wochenstart"].min(),
             "ende": wochen["Wochenende"].max(),
-            "farbe": f["farbe"],
+            "farbe": f.get("farbe", COLOR_HOLIDAY),
         })
 
 ferien_df = pd.DataFrame(ferien_bereiche)
@@ -566,7 +578,7 @@ for f in ferien:
             "end_kw": ende_kw + 0.5,
             "Zeitraum": ferien_zeitraum,
             "KW": f"KW {start_kw} - {ende_kw}",
-            "farbe": f["farbe"],
+            "farbe": f.get("farbe", COLOR_HOLIDAY),
         })
     else:
         passende_ferien = ferien_df[ferien_df["Ferien"] == f["name"]]
@@ -582,7 +594,7 @@ for f in ferien:
             "end_kw": 53.5,
             "Zeitraum": ferien_zeitraum,
             "KW": f"KW {start_kw} - 53",
-            "farbe": f["farbe"],
+            "farbe": f.get("farbe", COLOR_HOLIDAY),
         })
         ferien_kw.append({
             "Ferien": f["name"],
@@ -590,23 +602,40 @@ for f in ferien:
             "end_kw": ende_kw + 0.5,
             "Zeitraum": ferien_zeitraum,
             "KW": f"KW 1 - {ende_kw}",
-            "farbe": f["farbe"],
+            "farbe": f.get("farbe", COLOR_HOLIDAY),
         })
 
 ferien_kw_df = pd.DataFrame(ferien_kw)
 if not ferien_kw_df.empty:
+    ferien_domain = ferien_kw_df["Ferien"].drop_duplicates().tolist()
+    ferien_range = (
+        ferien_kw_df
+        .drop_duplicates("Ferien")
+        .set_index("Ferien")
+        .loc[ferien_domain, "farbe"]
+        .tolist()
+    )
     ferien_layer = (
         alt.Chart(ferien_kw_df)
-        .mark_rect(opacity=0.10)
+        .mark_rect(opacity=0.84, strokeOpacity=0.55, strokeWidth=1)
         .encode(
             x=alt.X("start_kw:Q"),
             x2=alt.X2("end_kw:Q"),
             color=alt.Color(
                 "Ferien:N",
-                legend=alt.Legend(
-                    orient="top",
-                    direction="horizontal",
+                scale=alt.Scale(
+                    domain=ferien_domain,
+                    range=ferien_range,
                 ),
+                legend=None,
+            ),
+            stroke=alt.Color(
+                "Ferien:N",
+                scale=alt.Scale(
+                    domain=ferien_domain,
+                    range=ferien_range,
+                ),
+                legend=None,
             ),
             tooltip=[
                 alt.Tooltip("Ferien:N"),
@@ -616,9 +645,49 @@ if not ferien_kw_df.empty:
         )
     )
 
+ferien_legend = ""
+if not ferien_kw_df.empty:
+    ferien_items = []
+    for name, color in zip(ferien_domain, ferien_range):
+        ferien_items.append(
+            f'<span style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;">'
+            f'<span style="width:18px;height:10px;background:{color};border:1px solid {color};opacity:.45;display:inline-block;"></span>'
+            f'{escape(str(name))}'
+            f'</span>'
+        )
+    ferien_legend = "".join(ferien_items)
+
+year_items = []
+for idx, year in enumerate(sorted(pro_woche["Jahr"].dropna().astype(str).unique())):
+    dash = "solid" if idx == 0 else "dashed"
+    year_items.append(
+        f'<span style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;">'
+        f'<span style="width:22px;border-top:3px {dash} {COLOR_VISITS};display:inline-block;"></span>'
+        f'{escape(str(year))}'
+        f'</span>'
+    )
+
+st.markdown(
+    f"""
+    <div style="display:flex;flex-wrap:wrap;gap:14px 20px;align-items:center;margin:.2rem 0 .6rem 0;font-size:.88rem;color:{TEXT};">
+        <span style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;">
+            <span style="width:18px;height:10px;background:{COLOR_LOANS};opacity:.45;display:inline-block;"></span>
+            Ausleihen
+        </span>
+        <span style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;">
+            <span style="width:22px;border-top:3px solid {COLOR_VISITS};display:inline-block;"></span>
+            Zutritte
+        </span>
+        {''.join(year_items)}
+        {ferien_legend}
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 ausleihen_balken = (
     alt.Chart(pro_woche)
-    .mark_bar(opacity=0.22, color="#64748b")
+    .mark_bar(opacity=0.26, color=COLOR_LOANS)
     .encode(
         x=alt.X(
             "Kalenderwoche:Q",
@@ -643,7 +712,7 @@ ausleihen_balken = (
 
 zutritte_linie = (
     alt.Chart(pro_woche)
-    .mark_line(point=True, strokeWidth=3)
+    .mark_line(color=COLOR_VISITS, point=True, strokeWidth=3)
     .encode(
         x=alt.X(
             "Kalenderwoche:Q",
@@ -655,13 +724,10 @@ zutritte_linie = (
             "Zutritte:Q",
             title="Zutritte",
         ),
-        color=alt.Color(
+        strokeDash=alt.StrokeDash(
             "Jahr:N",
             title="Jahr",
-            legend=alt.Legend(
-                orient="top",
-                direction="horizontal",
-            ),
+            legend=None,
         ),
         tooltip=[
             alt.Tooltip("Jahr:N"),
@@ -763,6 +829,10 @@ if not pro_woche.empty:
                 ),
                 color=alt.Color(
                     "Kennzahl:N",
+                    scale=alt.Scale(
+                        domain=["Zutritte", "Ausleihen"],
+                        range=[COLOR_VISITS, COLOR_LOANS],
+                    ),
                     legend=alt.Legend(orient="bottom"),
                 ),
                 tooltip=[
@@ -778,6 +848,8 @@ if not pro_woche.empty:
 
 
 # =====================================================
+
+title_with_icon("Zutritte und Ausleihen nach Wochentag/Stunde", CALENDAR, icon_size=34, level="subheader")
 steuerung_col1, steuerung_col2, steuerung_col3 = st.columns([1.8, 2.2, 1])
 
 with steuerung_col1:
@@ -816,7 +888,7 @@ with tab_zutritte:
     # ZUTRITTE NACH STUNDE
     # =====================================================
     
-    st.subheader("🕒 Zutritte nach Stunde")
+    st.caption("🕒 Zutritte nach Stunde")
     
     df_stunden_basis = df_open[
         df_open["Wochentag"].isin(ausgewaehlte_tage)
@@ -924,6 +996,10 @@ with tab_zutritte:
             color=alt.Color(
                 "Wochentag:N",
                 sort=reihenfolge,
+                scale=alt.Scale(
+                    domain=reihenfolge,
+                    range=COLOR_WEEKDAYS,
+                ),
                 legend=alt.Legend(orient="bottom")
             ),
             tooltip=[
@@ -939,7 +1015,7 @@ with tab_zutritte:
     
     gesamt_linie = (
         alt.Chart(stunden_gesamt)
-        .mark_line(color="#111827", point=True, strokeWidth=3)
+        .mark_line(color=TEXT, point=True, strokeWidth=3)
         .encode(
             x=alt.X(
                 "Stunden_label:N",
@@ -974,7 +1050,7 @@ with tab_zutritte:
     
 
 with tab_ausleihen:
-    st.subheader("📚 Ausleihen nach Stunde")
+    st.caption("📚 Ausleihen nach Stunde")
     
     df_ausleihen_stunden_basis = (
         df_loans_open[
@@ -1091,6 +1167,10 @@ with tab_ausleihen:
                 color=alt.Color(
                     "Wochentag:N",
                     sort=reihenfolge,
+                    scale=alt.Scale(
+                        domain=reihenfolge,
+                        range=COLOR_WEEKDAYS,
+                    ),
                     legend=alt.Legend(orient="bottom"),
                 ),
                 tooltip=[
@@ -1106,7 +1186,7 @@ with tab_ausleihen:
     
         ausleihen_linie = (
             alt.Chart(ausleihen_gesamt)
-            .mark_line(color="#111827", point=True, strokeWidth=3)
+            .mark_line(color=TEXT, point=True, strokeWidth=3)
             .encode(
                 x=alt.X(
                     "Stunden_label:N",
@@ -1144,7 +1224,7 @@ with tab_zutritte:
     # ZUTRITTE NACH WOCHENTAG
     # =====================================================
     
-    st.subheader("📅 Zutritte nach Wochentag")
+    st.caption("📅 Zutritte nach Wochentag")
     
     
     tage = (
@@ -1191,7 +1271,7 @@ with tab_zutritte:
     
     bars = (
         alt.Chart(tage)
-        .mark_bar()
+        .mark_bar(color=COLOR_VISITS)
         .encode(
             x=alt.X(
                 "Wochentag:N",
@@ -1215,7 +1295,7 @@ with tab_zutritte:
         alt.Chart(tage)
         .mark_text(
             dy=-8,
-            color="#111827",
+            color=TEXT,
             fontWeight="bold",
         )
         .encode(
@@ -1237,7 +1317,7 @@ with tab_zutritte:
     
 
 with tab_ausleihen:
-    st.subheader("📚 Ausleihen nach Wochentag")
+    st.caption("📚 Ausleihen nach Wochentag")
     
     if df_loans_open.empty or "Wochentag" not in df_loans_open.columns:
         st.info("Für die gewählten Filter sind keine Ausleihen der Zutrittskunden vorhanden.")
@@ -1300,7 +1380,7 @@ with tab_ausleihen:
     
         ausleihen_tage_bars = (
             alt.Chart(ausleihen_tage)
-            .mark_bar()
+            .mark_bar(color=COLOR_LOANS)
             .encode(
                 x=alt.X(
                     "Wochentag:N",
@@ -1324,7 +1404,7 @@ with tab_ausleihen:
             alt.Chart(ausleihen_tage)
             .mark_text(
                 dy=-8,
-                color="#111827",
+                color=TEXT,
                 fontWeight="bold",
             )
             .encode(

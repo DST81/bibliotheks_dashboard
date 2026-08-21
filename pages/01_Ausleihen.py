@@ -1,34 +1,31 @@
 import streamlit as st
 import pandas as pd
+import html
 from datetime import date, timedelta, datetime
 from src.filters import get_sidebar_filters, build_filtered_data
-from components.ui import kpi_box
+from components.ui import kpi_box, title_with_icon
+from components.icons import ANALYSE, BUCH, STANDORT, CALENDAR, DASHBOARD, ZIELGRUPPE
 import altair as alt
 import numpy as np
+from src.theme import (
+    CHIP_BORDER,
+    ACCENT,
+    TEXT,
+    WARNING,
+    COLOR_LOANS,
+    COLOR_APP,
+    COLOR_USAGE,
+    COLOR_EFFICIENCY,
+    COLOR_PREVIOUS,
+    COLOR_COMPARE_A,
+    COLOR_COMPARE_B,
+)
 
-st.set_page_config(page_title="Ausleihen Analyse", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Ausleihen Analyse", page_icon="assets/analyse.svg", layout="wide")
 
-# CSS Styles
-st.markdown("""
-<style>
-.main { padding-top: 1rem; }
-.block-container { padding-top: 2rem; }
-h1 { color: #264653; font-size: 2.2rem; }
-h2, h3 { color: #264653; }
-[data-testid="stMetric"] { border:1px solid #E6E6E6; border-radius:12px; padding:15px; background:white; box-shadow:0 2px 6px rgba(0,0,0,0.05); }
-[data-testid="stSidebar"] { background-color: #fafafa; }
-[data-testid="stSidebar"] .stMultiSelect, [data-testid="stSidebar"] .stDateInput { margin-bottom: .6rem; }
-[data-testid="stSidebar"] h3 { margin-top: 0.8rem; }
-[data-testid="stSidebar"] .stToggle { padding-top: .4rem; padding-bottom: .4rem; }
-.filter-chip{ display:inline-block; background:#eef3ff; color:#23405a; border:1px solid #c9d7ff; border-radius:18px; padding:5px 12px; margin:3px; font-size:0.88rem; }
-</style>
-""", unsafe_allow_html=True)
+title_with_icon("Detaillierte Analyse der Ausleihen", ANALYSE)
 
-st.title("📊 Detaillierte Ausleihen-Analyse")
 
-# Debugging
-if st.sidebar.checkbox("Debug State anzeigen", value=False):
-    st.write("Session State Keys:", [k for k in st.session_state.keys() if 'bib_dashboard' in k])
 
 # ==============================================================================
 # 1. DATEN LADEN
@@ -61,8 +58,8 @@ catalog_filters_config = [
     {"label": "📚 Medienart", "col": "Medienart", "type": "multiselect", "default": []},
     {"label": "🎯 Lesealter", "col": "Kategorie Alter", "type": "multiselect", "default": []},
     {"label": "🏷️ Themenbereich", "col": "Themenbereich", "type": "multiselect", "default": []},
-    {"label": "🔖 Signatur", "col": "Signatur Klartext", "type": "multiselect", "default": []},
-    {"label": "🔖 Signaturgruppe", "col": "Signatur(1)", "type": "multiselect", "default": []},
+    {"label": "🔖 Signatur Klartext", "col": "Signatur Klartext", "type": "multiselect", "default": []},
+    {"label": "🔖 Signatur", "col": "Signatur(1)", "type": "multiselect", "default": []},
 ]
 
 df_users_filtered, df_loans_filtered, filter_info = get_sidebar_filters(
@@ -123,8 +120,8 @@ c1,c_meta1, c_meta2, c_meta3 = st.columns([4,1,1,2])
 with c1:
     st.markdown("### 🔎 Aktive Filter")
     if chips:
-        html = "".join([f"<span class='filter-chip'>{chip}</span>" for chip in chips])
-        st.markdown(html, unsafe_allow_html=True)
+        chips_html = "".join([f"<span class='filter-chip'>{html.escape(str(chip))}</span>" for chip in chips])
+        st.markdown(chips_html, unsafe_allow_html=True)
     else:
         st.caption("Alle Daten (keine Einschränkung)")
 
@@ -271,8 +268,8 @@ tab_overview, tab_compare = st.tabs(["📈 Gesamtüberblick", "⚖️ Vergleichs
 # TAB 1: GESAMTÜBERBLICK
 # ==============================================================================
 with tab_overview:
-    st.markdown("### 🌍 Entwicklung aller Ausleihen")
-    
+    title_with_icon("Entwicklung aller Ausleihen", DASHBOARD, icon_size=34, level="subheader")
+        
     # --- CHART 1: ZEITVERLAUF ---
     if not df_loans_filtered.empty:
         df_chart = df_loans_filtered.copy()
@@ -299,26 +296,27 @@ with tab_overview:
                 x=alt.X("Monat:N", title="Monat", sort=ordered_months),
                 y=alt.Y("Anzahl:Q", title="Ausleihen"),
                 xOffset=alt.XOffset("Jahr:N"),
-                color=alt.Color("Jahr:N", title="Jahr")
+                color=alt.Color(
+                    "Jahr:N",
+                    title="Jahr",
+                    scale=alt.Scale(range=[COLOR_PREVIOUS, COLOR_LOANS, COLOR_APP, ACCENT]),
+                ),
             )
             st.altair_chart(chart, width='stretch')
             
             jahre_list = sorted([int(c) for c in pivot_data.columns])
-            if len(jahre_list) > 1:
-                st.info(f"Vergleich der Jahre: {', '.join(map(str, jahre_list))}.")
-            else:
-                st.caption(f"Zeitraum umfasst nur das Jahr {jahre_list[0]}.")
+
         else:
             st.warning("Keine gültigen Datumsdaten.")
     else:
         st.info("Keine Daten im gewählten Zeitraum.")
 
-    st.divider()
  
     # --- CHART 2 & 3: ÜBERSICHT ---
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.subheader("📚 Medienart (Gesamt)")
+        title_with_icon("Medienart",BUCH, icon_size=34,level="subheader")
+        #st.subheader("📚 Medienart (Gesamt)")
         if "Medienart_catalog" in df_loans_filtered.columns:
             data = df_loans_filtered["Medienart_catalog"].fillna("Unbekannt").value_counts().reset_index()
             data.columns = ["Medienart", "Anzahl"]
@@ -327,7 +325,7 @@ with tab_overview:
 
             chart = (
                 alt.Chart(data)
-                .mark_bar()
+                .mark_bar(color=COLOR_LOANS)
                 .encode(
                     x=alt.X("Anzahl:Q", title="Ausleihen"),
                     y=alt.Y("Medienart:N", sort=data_order, title=""),
@@ -343,7 +341,8 @@ with tab_overview:
         else:
             st.error("Keine Daten")
     with c2:
-        st.subheader("📍 Standort (Gesamt)")
+        title_with_icon("Standort", STANDORT, icon_size=30, level="subheader")
+        #st.subheader("📍 Standort (Gesamt)")
         if "Standort(1)" in df_loans_filtered.columns:
             data = (
                 df_loans_filtered["Standort(1)"]
@@ -360,7 +359,7 @@ with tab_overview:
 
             chart = (
                 alt.Chart(data)
-                .mark_bar()
+                .mark_bar(color=COLOR_LOANS)
                 .encode(
                     x=alt.X("Anzahl:Q", title="Ausleihen"),
                     y=alt.Y("Standort:N", sort=data_order, title=""),
@@ -376,7 +375,8 @@ with tab_overview:
             st.error("Keine Standortdaten")
 
     with c3:
-        st.subheader("📅 Wochentag (Gesamt)")
+        title_with_icon("Wochentag", CALENDAR, icon_size=34,level="subheader")
+        #st.subheader("📅 Wochentag (Gesamt)")
         if "Ausleihdatum" in df_loans_filtered.columns:
             df_temp = df_loans_filtered.dropna(subset=["Ausleihdatum"]).copy()
             if not df_temp.empty:
@@ -388,7 +388,7 @@ with tab_overview:
 
                 chart = (
                     alt.Chart(data)
-                    .mark_bar()
+                    .mark_bar(color=COLOR_LOANS)
                     .encode(
                         x=alt.X(
                             "WD:N",
@@ -405,8 +405,9 @@ with tab_overview:
 
                 st.altair_chart(chart, use_container_width=True)
 
-    st.divider()
-    st.subheader("Wochentage im Jahresvergleich")
+
+    title_with_icon("Wochentage im Jahresvergleich", CALENDAR,icon_size=34,level="subheader")
+    #st.subheader("Wochentage im Jahresvergleich")
     st.caption(
         "Letzte drei verfügbare Jahre mit allen aktiven Filtern ausser dem Zeitraumfilter."
     )
@@ -480,10 +481,10 @@ with tab_overview:
             )
 
             st.markdown(
-                """
+                f"""
                 <div style="display:flex; gap:18px; align-items:center; margin:.25rem 0 .5rem 0; font-size:.9rem;">
-                    <span><span style="display:inline-block;width:22px;height:12px;background:#4c78a8;border-radius:2px;margin-right:6px;"></span>Theke: dunkel</span>
-                    <span><span style="display:inline-block;width:22px;height:12px;background:#b8cce4;border-radius:2px;margin-right:6px;border:1px solid #8aa7c5;"></span>App: hell</span>
+                    <span><span style="display:inline-block;width:22px;height:12px;background:{COLOR_LOANS};border-radius:2px;margin-right:6px;"></span>Theke</span>
+                    <span><span style="display:inline-block;width:22px;height:12px;background:{COLOR_APP};border-radius:2px;margin-right:6px;border:1px solid {CHIP_BORDER};"></span>App</span>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -495,15 +496,20 @@ with tab_overview:
                 .encode(
                     x=alt.X("Wochentag:N", sort=weekday_order, title="Wochentag"),
                     y=alt.Y("Anteil:Q", title="Anteil an Jahresausleihen (%)"),
-                    color=alt.Color("Jahr:N", title="Jahr"),
-                    opacity=alt.Opacity(
+                    color=alt.Color(
                         "Ausleihkanal:N",
                         title="Ausleihart",
                         scale=alt.Scale(
                             domain=["Theke", "App"],
-                            range=[1.0, 0.28],
+                            range=[COLOR_LOANS, COLOR_APP],
                         ),
-                        legend=None,
+                    ),
+                    opacity=alt.Opacity(
+                        "Jahr:N",
+                        title="Jahr",
+                        scale=alt.Scale(
+                            range=[0.45, 0.7, 1.0],
+                        ),
                     ),
                     xOffset=alt.XOffset("Jahr:N"),
                     order=alt.Order("Ausleihkanal:N", sort="descending"),
@@ -528,8 +534,9 @@ with tab_overview:
 # TAB 2: VERGLEICHSANALYSE
 # ==============================================================================
 with tab_compare:
-    st.markdown("### 🔍 Zielgruppen-Vergleich")
-    st.caption("Vergleiche zwei beliebige Segmente miteinander.")
+    title_with_icon("Zielgruppen-Vergleich", ZIELGRUPPE, icon_size=34, level="subheader")
+    #st.markdown("### 🔍 Zielgruppen-Vergleich")
+    #st.caption("Vergleiche zwei beliebige Segmente miteinander.")
     
     if 'Benutzergruppe' not in df_merged.columns:
         st.warning("Keine Benutzergruppen-Daten verfügbar.")
@@ -566,13 +573,13 @@ with tab_compare:
             min_a, max_a = int(df_merged['Alter'].min()), int(df_merged['Alter'].max())
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown("🔵 **Gruppe A**")
-                range_a = st.slider("Alter A", min_a, max_a, (min_a, 25), key="slide_a")
+                #st.markdown("🔵 **Gruppe A**")
+                range_a = st.slider("Alter in Jahren", min_a, max_a, (min_a, 25), key="slide_a")
                 label_a = f"{range_a[0]}-{range_a[1]} J."
             with c2:
-                st.markdown("🔴 **Gruppe B**")
+                #st.markdown("🔴 **Gruppe B**")
                 start_b = min(range_a[1] + 1, max_a)
-                range_b = st.slider("Alter B", min_a, max_a, (start_b, max_a), key="slide_b")
+                range_b = st.slider("Alter in Jahren", min_a, max_a, (start_b, max_a), key="slide_b")
                 label_b = f"{range_b[0]}-{range_b[1]} J."
             
             mask_a = (df_merged['Alter'] >= range_a[0]) & (df_merged['Alter'] <= range_a[1])
@@ -591,7 +598,8 @@ with tab_compare:
         col1, col2, col3 = st.columns([2,2,1])
         with col1:
             # Medienart
-            st.markdown("#### 📚 Medienart-Präferenzen")
+            title_with_icon("Medienart-Präferenzen", BUCH, icon_size=34, level="subheader")
+            #st.markdown("#### 📚 Medienart-Präferenzen")
             if "Medienart_catalog" in df_compare.columns:
                 df_compare = df_compare.copy()
                 df_compare["Medienart_Anzeige"] = df_compare["Medienart_catalog"]
@@ -605,7 +613,7 @@ with tab_compare:
                 chart = alt.Chart(data).mark_bar().encode(
                     x=alt.X('Medienart:N', sort='-y'),
                     y=alt.Y('Anzahl:Q'),
-                    color=alt.Color('Vergleichsgruppe:N', scale=alt.Scale(domain=[label_a, label_b], range=['#1f77b4', '#d62728'])),
+                    color=alt.Color('Vergleichsgruppe:N', scale=alt.Scale(domain=[label_a, label_b], range=[COLOR_COMPARE_A, COLOR_COMPARE_B])),
                     xOffset='Vergleichsgruppe:N',
                     tooltip=['Medienart', 'Vergleichsgruppe', 'Anzahl']
                 ).properties(
@@ -617,7 +625,8 @@ with tab_compare:
                 st.write(df_compare.columns)
         with col2: 
             # Wochentag
-            st.markdown("#### 📅 Ausleihtage")
+            title_with_icon("Ausleihtage", CALENDAR, icon_size=34, level="subheader")
+            #st.markdown("#### 📅 Ausleihtage")
             df_wd = df_compare.dropna(subset=['Ausleihdatum']).copy()
             if not df_wd.empty:
                 df_wd['Datum'] = pd.to_datetime(df_wd['Ausleihdatum'], errors='coerce')
@@ -626,7 +635,7 @@ with tab_compare:
                 chart = alt.Chart(data).mark_bar().encode(
                     x=alt.X('Wochentag:N', sort=["Mo","Di","Mi","Do","Fr","Sa","So"]),
                     y=alt.Y('Anzahl:Q'),
-                    color=alt.Color('Vergleichsgruppe:N', scale=alt.Scale(domain=[label_a, label_b], range=['#1f77b4', '#d62728'])),
+                    color=alt.Color('Vergleichsgruppe:N', scale=alt.Scale(domain=[label_a, label_b], range=[COLOR_COMPARE_A, COLOR_COMPARE_B])),
                     xOffset='Vergleichsgruppe:N',
                     tooltip=['Wochentag', 'Vergleichsgruppe', 'Anzahl']
                 ).properties(
@@ -636,7 +645,7 @@ with tab_compare:
                 st.altair_chart(chart, width='stretch')
         with col3:
             st.markdown(
-                f"#### 📚 Ø Ausleihen pro Besuch\n"
+                f"#### Ø Ausleihen pro Besuch\n"
                 f"({zeitraum_text})"
             )
 
@@ -689,7 +698,7 @@ with tab_compare:
                 st.info("Für diese Berechnung fehlen Ausleihperson oder Ausleihdatum.")
 
             st.markdown(
-                f"#### 🚶 Ø Besuche im Zeitraum\n"
+                f"####  Ø Besuche im Zeitraum\n"
                 f"({zeitraum_text})"
             )
 
@@ -731,8 +740,9 @@ with tab_compare:
         st.info("👈 Bitte konfigurieren Sie oben den Vergleich, um Ergebnisse zu sehen.")
 
 
-st.divider()
-st.subheader("📈 Bestandsnutzung im gefilterten Bestand")
+
+title_with_icon("Bestandesnutzung im gefilterten Bestand", DASHBOARD,icon_size=34, level="subheader")
+#st.subheader("📈 Bestandsnutzung im gefilterten Bestand")
 bestandsnutzung_ausleihen = len(df_merged)
 bestandsnutzung_bestand = len(df_books) if df_books is not None else 0
 bestandsnutzung_umlauf = (
@@ -800,7 +810,7 @@ if "Medienart_catalog" in df_merged.columns:
             medienart_order = medienart["Medienart"].tolist()
             bars = (
                 alt.Chart(medienart)
-                .mark_bar()
+                .mark_bar(color=COLOR_LOANS)
                 .encode(
                     x=alt.X(
                         "Ausleihen:Q",
@@ -828,7 +838,8 @@ if "Medienart_catalog" in df_merged.columns:
                 alt.Chart(medienart)
                 .mark_text(
                     align="left",
-                    dx=5
+                    dx=5,
+                    color=TEXT,
                 )
                 .encode(
                     x="Ausleihen:Q",
@@ -926,7 +937,7 @@ if "Medienart_catalog" in df_merged.columns:
                          
             chart = (
                 alt.Chart(medienart_umlauf)
-                .mark_bar()
+                .mark_bar(color=COLOR_USAGE)
                 .encode(
                     x=alt.X(
                         "Umlauf:Q",
@@ -960,7 +971,7 @@ if "Medienart_catalog" in df_merged.columns:
             st.markdown("**📈 Effizienz (Ausleihanteil / Bestandesanteil)** ")
             rule = (
                 alt.Chart(pd.DataFrame({"Effizienz": [1]}))
-                .mark_rule(strokeDash=[4, 4], color="red")
+                .mark_rule(strokeDash=[8, 4], strokeWidth=2.5, color=WARNING)
                 .encode(
                     x="Effizienz:Q"
                 )
@@ -968,7 +979,7 @@ if "Medienart_catalog" in df_merged.columns:
                         
             chart = (
                 alt.Chart(medienart_effizienz_plot)
-                .mark_bar()
+                .mark_bar(color=COLOR_EFFICIENCY)
                 .encode(
                     x=alt.X(
                         "Effizienz:Q",
@@ -1041,7 +1052,7 @@ if "Standort(1)" in df_merged.columns:
 
             bars = (
                 alt.Chart(standort)
-                .mark_bar()
+                .mark_bar(color=COLOR_LOANS)
                 .encode(
                     x=alt.X(
                         "Ausleihen:Q",
@@ -1069,7 +1080,8 @@ if "Standort(1)" in df_merged.columns:
                 alt.Chart(standort)
                 .mark_text(
                     align="left",
-                    dx=5
+                    dx=5,
+                    color=TEXT,
                 )
                 .encode(
                     x="Ausleihen:Q",
@@ -1164,7 +1176,7 @@ if "Standort(1)" in df_merged.columns:
             st.markdown("**📈 Bestandsnutzung (Umsatz)**")
             chart = (
                 alt.Chart(standort_umlauf)
-                .mark_bar()
+                .mark_bar(color=COLOR_USAGE)
                 .encode(
                     x=alt.X(
                         "Umlauf:Q",
@@ -1199,7 +1211,7 @@ if "Standort(1)" in df_merged.columns:
             st.markdown("**📈 Effizienz (Ausleihanteil / Bestandesanteil)** ")
             rule = (
                 alt.Chart(pd.DataFrame({"Effizienz": [1]}))
-                .mark_rule(strokeDash=[4, 4], color="red")
+                .mark_rule(strokeDash=[8, 4], strokeWidth=2.5, color=WARNING)
                 .encode(
                     x="Effizienz:Q"
                 )
@@ -1207,7 +1219,7 @@ if "Standort(1)" in df_merged.columns:
                         
             chart = (
                 alt.Chart(standort_effizienz_plot)
-                .mark_bar()
+                .mark_bar(color=COLOR_EFFICIENCY)
                 .encode(
                     x=alt.X(
                         "Effizienz:Q",

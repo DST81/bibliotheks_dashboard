@@ -468,14 +468,14 @@ def get_sidebar_filters(
 
     _init_state_safe(
         f"{prefix}_groups",
-        list(unique_groups),
+        [],
         query_params,
         "groups",
     )
 
     _init_state_safe(
         f"{prefix}_gender",
-        list(unique_genders),
+        [],
         query_params,
         "gender",
     )
@@ -504,6 +504,12 @@ def get_sidebar_filters(
         query_params,
         "ss",
     )
+
+    if set(map(str, st.session_state.get(f"{prefix}_groups", []))) == set(map(str, unique_groups)):
+        st.session_state[f"{prefix}_groups"] = []
+
+    if set(map(str, st.session_state.get(f"{prefix}_gender", []))) == set(map(str, unique_genders)):
+        st.session_state[f"{prefix}_gender"] = []
 
     # --------------------------------------------------------
     # Ausleihfilter initialisieren
@@ -568,6 +574,7 @@ def get_sidebar_filters(
     mode_key = f"{prefix}_period_mode"
     all_data_label = "Alle verfügbaren Ausleihen"
     recent_year_label = "Letzte 12 Monate"
+    current_year_label = "Aktuelles Jahr"
 
     date_range_val = None
     min_d = None
@@ -607,30 +614,32 @@ def get_sidebar_filters(
         elif st.session_state[mode_key] == "Vergleich (12 Monate)":
             st.session_state[mode_key] = recent_year_label
 
-        def on_mode_change():
-            new_mode = st.session_state[mode_key]
+        def range_for_mode(mode):
+            if mode == all_data_label:
+                return (min_d, max_d)
+            if mode == current_year_label:
+                start_date = date(max_d.year, 1, 1)
+                if start_date < min_d:
+                    start_date = min_d
+                return (start_date, max_d)
 
-            if new_mode == all_data_label:
-                new_range = (min_d, max_d)
-            else:
+            if mode == recent_year_label:
                 start_date = max_d - timedelta(days=365)
                 if start_date < min_d:
                     start_date = min_d
 
-                new_range = (start_date, max_d)
+                return (start_date, max_d)
+
+            return (min_d, max_d)
+
+        def on_mode_change():
+            new_range = range_for_mode(st.session_state[mode_key])
 
             st.session_state[date_key] = new_range
             st.session_state[valid_date_key] = new_range
 
         if date_key not in st.session_state:
-            if st.session_state[mode_key] == all_data_label:
-                st.session_state[date_key] = (min_d, max_d)
-            else:
-                start_date = max_d - timedelta(days=365)
-                if start_date < min_d:
-                    start_date = min_d
-
-                st.session_state[date_key] = (start_date, max_d)
+            st.session_state[date_key] = range_for_mode(st.session_state[mode_key])
 
         if valid_date_key not in st.session_state:
             st.session_state[valid_date_key] = st.session_state[date_key]
@@ -664,133 +673,69 @@ def get_sidebar_filters(
             expanded=expander_defaults.get("target", False),
         ):
 
-            st.subheader("Benutzergruppe")
-
-            c1, c2 = st.columns(2)
-
-            if c1.button(
-                "Alle",
-                key=f"{prefix}_btn_all_grp",
-                use_container_width=True,
-            ):
-                st.session_state[f"{prefix}_groups"] = list(unique_groups)
-                st.rerun()
-
-            if c2.button(
-                "Keine",
-                key=f"{prefix}_btn_none_grp",
-                use_container_width=True,
-            ):
-                st.session_state[f"{prefix}_groups"] = []
-                st.rerun()
-
             sel_grp = st.multiselect(
-                "Wählen",
+                "Benutzergruppe",
                 options=unique_groups,
                 key=f"{prefix}_groups",
-                label_visibility="collapsed",
                 placeholder="Alle",
+                help=(
+                    "Tippen, um eine Gruppe zu suchen."
+                    if len(unique_groups) > 15 else None
+                ),
             )
-
-            st.subheader("Geschlecht")
 
             sel_gen = st.multiselect(
                 "Geschlecht",
                 options=unique_genders,
                 key=f"{prefix}_gender",
-                label_visibility="collapsed",
                 placeholder="Alle",
             )
 
-            st.subheader("Alter")
-
             if "Geburtsdatum" in df_for_filter.columns:
                 sel_age = st.slider(
-                    "Spanne",
+                    "Alter",
                     min_value=min_age,
                     max_value=max_age,
                     key=f"{prefix}_age",
                 )
 
-            st.subheader("Self-Service")
-
-            current_ss = st.session_state.get(
-                f"{prefix}_ss_list",
-                [],
+            sel_ss = st.multiselect(
+                "Self-Service",
+                options=[
+                    "Türöffner & Berechtigung",
+                    "Nur Berechtigung",
+                    "Nur Türöffner",
+                ],
+                key=f"{prefix}_ss_list",
+                placeholder="Alle",
             )
-
-            def update_ss():
-                new_ss = []
-
-                if st.session_state.get(
-                    f"{prefix}_cb_both",
-                    False,
-                ):
-                    new_ss.append("Türöffner & Berechtigung")
-
-                if st.session_state.get(
-                    f"{prefix}_cb_auth",
-                    False,
-                ):
-                    new_ss.append("Nur Berechtigung")
-
-                if st.session_state.get(
-                    f"{prefix}_cb_door",
-                    False,
-                ):
-                    new_ss.append("Nur Türöffner")
-
-                st.session_state[f"{prefix}_ss_list"] = new_ss
-
-            c_ss1, c_ss2, c_ss3 = st.columns(3)
-
-            with c_ss1:
-                st.checkbox(
-                    "Beides",
-                    value="Türöffner & Berechtigung" in current_ss,
-                    key=f"{prefix}_cb_both",
-                    on_change=update_ss,
-                )
-
-            with c_ss2:
-                st.checkbox(
-                    "Nur App",
-                    value="Nur Berechtigung" in current_ss,
-                    key=f"{prefix}_cb_auth",
-                    on_change=update_ss,
-                )
-
-            with c_ss3:
-                st.checkbox(
-                    "Nur Tür",
-                    value="Nur Türöffner" in current_ss,
-                    key=f"{prefix}_cb_door",
-                    on_change=update_ss,
-                )
-
-            sel_ss = st.session_state.get(
-                f"{prefix}_ss_list",
-                [],
-            )
-
-            st.subheader("Wohnort")
-
-            if len(unique_locs) > 20:
-                st.caption("💡 Tippen zum Suchen")
 
             sel_loc = st.multiselect(
-                "Orte",
+                "Wohnort",
                 options=unique_locs,
                 key=f"{prefix}_location",
-                label_visibility="collapsed",
                 placeholder="Alle",
+                help=(
+                    "Tippen, um einen Ort zu suchen."
+                    if len(unique_locs) > 15 else None
+                ),
             )
 
     # --------------------------------------------------------
     # Ausleihe
     # --------------------------------------------------------
 
-    if has_extra:
+    show_loans_expander = (
+        (
+            enable_date_filter
+            and date_col_name in df_extra.columns
+            and min_d is not None
+        )
+        or enable_first_loan_toggle
+        or bool(extra_filters_config and extra_filter_keys)
+    )
+
+    if has_extra and show_loans_expander:
         with st.sidebar.expander(
             expander_labels.get("loans", "📊 Ausleihe"),
             expanded=expander_defaults.get("loans", True),
@@ -801,18 +746,16 @@ def get_sidebar_filters(
                 and date_col_name in df_extra.columns
                 and min_d is not None
             ):
-                st.markdown("**📅 Zeitraum**")
-
                 st.radio(
                     "Zeitraum-Vorauswahl",
                     options=[
+                        current_year_label,
                         recent_year_label,
                         all_data_label,
                     ],
                     key=mode_key,
                     horizontal=True,
                     on_change=on_mode_change,
-                    label_visibility="collapsed",
                 )
 
                 date_range_val = st.date_input(
@@ -836,11 +779,7 @@ def get_sidebar_filters(
                         "Bis dahin bleibt der letzte vollständige Zeitraum aktiv."
                     )
 
-                st.divider()
-
             if enable_first_loan_toggle:
-                st.markdown("**⚙️ Optionen**")
-
                 st.toggle(
                     "Ohne Verlängerungen",
                     key=f"{prefix}_first_loan",
@@ -849,8 +788,6 @@ def get_sidebar_filters(
                         "Datensätze ohne Verlängerung."
                     ),
                 )
-
-                st.divider()
 
             if extra_filters_config:
                 for col, key_ms in extra_filter_keys.items():
@@ -875,6 +812,10 @@ def get_sidebar_filters(
                         options=values,
                         key=key_ms,
                         placeholder="Alle",
+                        help=(
+                            "Tippen, um einen Wert zu suchen."
+                            if len(values) > 15 else None
+                        ),
                     )
 
     # --------------------------------------------------------
@@ -1126,9 +1067,12 @@ def get_sidebar_filters(
 
     return df_res, df_extra_res, {
         "groups": sel_grp,
+        "group_options": unique_groups,
         "gender": sel_gen,
+        "gender_options": unique_genders,
         "age_range": sel_age,
         "locations": sel_loc,
+        "location_options": unique_locs,
         "ss_filter": sel_ss,
         "date_range": date_range_val,
         "first_loan_only": (

@@ -3,9 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
+from src.theme import SUCCESS, DANGER
 
 
-def format_filter_value(value: Any, *, currency: bool = False) -> str:
+def format_filter_value(value: Any, *, currency: bool = False, max_list_items: int | None = 3) -> str:
     if value in (None, "", []):
         return "Alle"
 
@@ -18,7 +19,7 @@ def format_filter_value(value: Any, *, currency: bool = False) -> str:
         return f"{left} - {right}"
 
     if isinstance(value, list):
-        if len(value) <= 3:
+        if max_list_items is None or len(value) <= max_list_items:
             return ", ".join(map(str, value))
         return f"{len(value)} ausgewählt"
 
@@ -27,17 +28,22 @@ def format_filter_value(value: Any, *, currency: bool = False) -> str:
 
 def build_home_filter_summary(filter_state: dict) -> list[tuple[str, str]]:
     extra_filters = filter_state.get("extra_filters", {})
+    groups = filter_state.get("groups")
+    group_options = filter_state.get("group_options")
+    groups_value = format_filter_value(groups, max_list_items=None)
+    if groups and group_options and set(map(str, groups)) == set(map(str, group_options)):
+        groups_value = "Alle"
 
     return [
         ("Ausleihzeitraum", format_filter_value(filter_state.get("date_range"))),
-        ("Benutzergruppen", format_filter_value(filter_state.get("groups"))),
+        ("Benutzergruppen", groups_value),
         ("Geschlecht", format_filter_value(filter_state.get("gender"))),
         ("Alter", format_filter_value(filter_state.get("age_range"))),
         ("Wohnort", format_filter_value(filter_state.get("locations"))),
         ("Zweigstelle", format_filter_value(extra_filters.get("Zweigstelle"))),
         ("Medienart", format_filter_value(extra_filters.get("Medienart"))),
         ("Lesealter", format_filter_value(extra_filters.get("Kategorie Alter"))),
-        ("Erstausleihen", "Ja" if filter_state.get("first_loan_only") else "Nein"),
+        ("Mit Verlängerungen", "Nein" if filter_state.get("first_loan_only") else "Ja"),
     ]
 
 
@@ -55,7 +61,7 @@ def build_media_filter_summary(filter_state: dict) -> list[tuple[str, str]]:
         ("Lesealter", format_filter_value(catalog_filters.get("Kategorie Alter"))),
         ("Standort", format_filter_value(catalog_filters.get("Standort(1)"))),
         ("Sprache", format_filter_value(catalog_filters.get("Sprache(1)"))),
-        ("Erstausleihen", "Ja" if filter_state.get("first_loan_only") else "Nein"),
+        ("Mit Verlängerungen", "Nein" if filter_state.get("first_loan_only") else "Ja"),
     ]
 
 
@@ -154,8 +160,8 @@ def format_delta(current: float | int, previous: float | int | None, decimals: i
 def delta_color(current: float | int, previous: float | int | None) -> str:
     change = percent_change(current, previous)
     if change is None or change >= 0:
-        return "#2E7D32"
-    return "#C62828"
+        return SUCCESS
+    return DANGER
 
 
 def format_pdf_delta(current: float | int, previous: float | int | None) -> str:

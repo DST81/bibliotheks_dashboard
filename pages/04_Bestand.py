@@ -2,16 +2,20 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 import numpy as np
+from html import escape
 
 from src.filters import get_sidebar_filters, build_filtered_data
-from components.ui import show_media_detail, kpi_box
+from components.ui import show_media_detail, kpi_box, title_with_icon
+from components.icons import BESTAND, SCATTER
 from src.bestand_analysis import berechne_bestand_mit_reihen
+from src.report_helpers import format_filter_value
+from src.theme import BESTAND_STATUS_COLORS
 
 
 
 st.set_page_config(
     page_title="Bestandsanalyse",
-    page_icon="📦",
+    page_icon="assets/bestand.svg",
     layout="wide"
 )
 
@@ -19,8 +23,7 @@ st.set_page_config(
 
 col1, col2 = st.columns([3,2])
 with col1:
-    st.title("📦 Bestandsanalyse")
-
+    title_with_icon("Bestandesanalyse", BESTAND, icon_size=38)
 
 
 st.sidebar.info(
@@ -78,6 +81,19 @@ if df_books is not None and "Medienart" in df_books.columns:
     if not medienart_counts.empty:
         erste_medienart_default = [medienart_counts.index[0]]
 
+erste_kategorie_alter_default = []
+if df_books is not None and "Kategorie Alter" in df_books.columns:
+    kategorie_alter_counts = (
+        df_books["Kategorie Alter"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .loc[lambda s: s != ""]
+        .value_counts()
+    )
+    if not kategorie_alter_counts.empty:
+        erste_kategorie_alter_default = [kategorie_alter_counts.index[0]]
+
 medienart_filter_key = "bestand_catalog_Medienart"
 if (
     erste_medienart_default
@@ -86,10 +102,21 @@ if (
     st.session_state.setdefault(medienart_filter_key, erste_medienart_default)
     st.session_state["bestand_default_medienart_initialized"] = True
 
+kategorie_alter_filter_key = "bestand_catalog_Kategorie Alter"
+if (
+    erste_kategorie_alter_default
+    and "bestand_default_kategorie_alter_initialized" not in st.session_state
+):
+    st.session_state.setdefault(kategorie_alter_filter_key, erste_kategorie_alter_default)
+    st.session_state["bestand_default_kategorie_alter_initialized"] = True
+
 catalog_filters_config = [
     {"label": "📍 Standort", "col": "Standort(1)", "type": "multiselect", "default": []},
     {"label": "📚 Medienart", "col": "Medienart", "type": "multiselect", "default": erste_medienart_default},
-    {"label": "🎯 Lesealter", "col": "Kategorie Alter", "type": "multiselect", "default": []},
+    {"label": "🎯 Lesealter", "col": "Kategorie Alter", "type": "multiselect", "default": erste_kategorie_alter_default},
+    {"label": "🏷️ Themenbereich", "col": "Themenbereich", "type": "multiselect", "default": []},
+    {"label": "🔖 Signatur Klartext", "col": "Signatur Klartext", "type": "multiselect", "default": []},
+    {"label": "🔖 Signatur", "col": "Signatur(1)", "type": "multiselect", "default": []},
 ]
 
 filtered_users, df_loans_filtered, filter_info = get_sidebar_filters(
@@ -256,28 +283,12 @@ with col2:
             f"Entspricht Score {schwelle_gruen:.1f} bzw. {schwelle_rot:.1f} "
             f"(Basis: {basis_wahl.split(' ', 1)[1]})."
         )
-        st.info(
+        st.caption(
             f"Reihenschwellen: "
-            f"gut ≤ {basis_df["Bereinigungsscore"].quantile(0.33)}, \n"
-            f"wenig genutzt ≥ {basis_df["Bereinigungsscore"].quantile(0.66)}, "
-            f"Abweichung ±{0.5 * basis_df["Bereinigungsscore"].std()}"
+            f"gut ≤ {basis_df["Bereinigungsscore"].quantile(0.33):.1f}, \n"
+            f"wenig genutzt ≥ {basis_df["Bereinigungsscore"].quantile(0.66):.1f}, "
+            f"Abweichung ±{0.5 * basis_df["Bereinigungsscore"].std():.1f}"
         )
-        # --- Live-Vorschau: wie viele Medien landen in welcher Kategorie? ---
-        if not df_bestand.empty:
-            n_gruen = (df_bestand["Bereinigungsscore"] <= schwelle_gruen).sum()
-            n_gelb = (
-                (df_bestand["Bereinigungsscore"] > schwelle_gruen)
-                & (df_bestand["Bereinigungsscore"] <= schwelle_rot_sicher)
-            ).sum()
-            n_rot = (df_bestand["Bereinigungsscore"] > schwelle_rot_sicher).sum()
-
-            st.markdown(
-                f"**Vorschau (aktuelle Filterung):** "
-                f"🟢 {n_gruen:,} behalten · 🟡 {n_gelb:,} prüfen · "
-                f"🔴 {n_rot:,} Bereinigung prüfen"
-            )
-
-
 df_bestand["Bereinigung"] = pd.cut(
     df_bestand["Bereinigungsscore"],
     bins=[-1, schwelle_gruen, schwelle_rot_sicher, float("inf")],
@@ -313,14 +324,10 @@ st.divider()
 # PORTFOLIO-ANALYSE: ALTER VS. NUTZUNG
 # =====================================================
 
-farben = {
-    "🟢 behalten": "#2ca02c",
-    "🟡 prüfen": "#f1c40f",
-    "🔴 Bereinigung prüfen": "#e74c3c",
-}
+farben = BESTAND_STATUS_COLORS
 col1, col2 = st.columns([3,2])
 with col1: 
-    st.subheader("📈 Bestandsportfolio: Alter vs. Nutzung")
+    title_with_icon("Bestandsportfolio: Alter vs. Nutzung", SCATTER, icon_size=34, level="subheader")
 
 scatter_data = df_bestand.copy()
 scatter_data = scatter_data[scatter_data["Alter_Jahre"].notna()]
@@ -361,6 +368,8 @@ benoetigte_spalten = [
 ]
 benoetigte_spalten = [c for c in benoetigte_spalten if c in scatter_data.columns]
 scatter_data = scatter_data[benoetigte_spalten].copy()
+
+sichtbare_kategorien = df_bestand["Bereinigung"].cat.categories.tolist()
 
 if not scatter_data.empty:
 
@@ -488,14 +497,17 @@ with st.expander("📋 Liste: Bereinigungskandidaten"):
         )
 
     score = df_bestand.sort_values("Bereinigungsscore", ascending=False)
-    
+    score = score[
+        score["Bereinigung"].isin(sichtbare_kategorien)
+    ]
+
     with col2:
         suche = st.text_input("🔍 Medium suchen", key='bestand_suche')
 
         if suche:
             if suche.isdigit():
-                score=df_bestand_full[
-                    df_bestand_full['NR Zugang'].astype(str)==suche
+                score=score[
+                    score['NR Zugang'].astype(str)==suche
                 ]
             else:
                 maske = (
@@ -512,6 +524,129 @@ with st.expander("📋 Liste: Bereinigungskandidaten"):
 
                 score = score[maske]
 
+    def formatiere_band_position(row):
+        band = row.get("Band")
+        if pd.isna(band) or str(band).strip() == "":
+            return ""
+
+        band_num = pd.to_numeric(pd.Series([band]), errors="coerce").iloc[0]
+        band_text = str(int(band_num)) if pd.notna(band_num) and float(band_num).is_integer() else str(band).strip()
+
+        anzahl = row.get("Reihen_Anzahl_Baende")
+        anzahl_num = pd.to_numeric(pd.Series([anzahl]), errors="coerce").iloc[0]
+        if pd.notna(anzahl_num) and anzahl_num >= 2:
+            return f"{band_text}/{int(anzahl_num)}"
+
+        return band_text
+
+    druck_spalten_quellen = [
+        ("Signatur", "Signatur(1)"),
+        ("Nr Zugang", "NR Zugang"),
+        ("Titel", "Titel"),
+        ("Verfasser", "Verfasser I(1)"),
+        ("Kategorie Alter", "Kategorie Alter"),
+        ("Reihe(1)", "Reihe(1)"),
+        ("Band", "Band"),
+        ("Bereinigungsscore", "Bereinigungsscore"),
+        ("Bereinigung", "Bereinigung"),
+        ("Aufnahme", "Aufnahme_Monat_Jahr"),
+        ("Letzte Ausleihe", "Letzte_Ausleihe"),
+        ("Reihen-Hinweis", "Reihen_Hinweis"),
+    ]
+    druckliste = score.copy()
+    sort_spalten = [c for c in ["Signatur(1)", "Letzte_Ausleihe"] if c in druckliste.columns]
+    if sort_spalten:
+        druckliste = druckliste.sort_values(
+            sort_spalten,
+            key=lambda s: (
+                pd.to_datetime(s, errors="coerce")
+                if s.name == "Letzte_Ausleihe"
+                else s.astype(str).str.lower()
+            ),
+            na_position="last",
+        )
+
+    druckliste_export = pd.DataFrame()
+    for ziel_spalte, quell_spalte in druck_spalten_quellen:
+        if quell_spalte in druckliste.columns:
+            druckliste_export[ziel_spalte] = druckliste[quell_spalte]
+        else:
+            druckliste_export[ziel_spalte] = ""
+
+    if "Band" in druckliste_export.columns:
+        druckliste_export["Band"] = druckliste.apply(formatiere_band_position, axis=1).tolist()
+
+    if "Letzte Ausleihe" in druckliste_export.columns:
+        letzte_ausleihe = pd.to_datetime(druckliste_export["Letzte Ausleihe"], errors="coerce")
+        druckliste_export["Letzte Ausleihe"] = letzte_ausleihe.dt.strftime("%d.%m.%Y").fillna("")
+
+    druck_infos = [
+        f"{len(druckliste_export)} Medien",
+        "sortiert nach Signatur und letzter Ausleihe",
+        f"Kategorien: {', '.join(map(str, sichtbare_kategorien)) if sichtbare_kategorien else 'keine'}",
+    ]
+    sidebar_filter_labels = {
+        conf["col"]: conf.get("label", conf["col"]).split(" ", 1)[-1]
+        for conf in catalog_filters_config
+    }
+    sidebar_filter_infos = []
+    for col, value in filter_info.get("catalog_filters", {}).items():
+        formatted_value = format_filter_value(value)
+        if formatted_value != "Alle":
+            label = sidebar_filter_labels.get(col, col)
+            sidebar_filter_infos.append(f"{label}: {formatted_value}")
+    if sidebar_filter_infos:
+        druck_infos.append(f"Filter: {' | '.join(sidebar_filter_infos)}")
+    if suche:
+        druck_infos.append(f"Suche: {suche}")
+    druck_infos_html = escape(" · ".join(druck_infos))
+
+    druck_html = f"""
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Bereinigungsliste</title>
+<style>
+    body {{ font-family: Arial, sans-serif; color: #263238; }}
+    h1 {{ font-size: 18px; margin: 0 0 8px; }}
+    p {{ font-size: 11px; margin: 0 0 12px; color: #6B7280; }}
+    table {{ width: auto; max-width: 100%; border-collapse: collapse; font-size: 9.5px; table-layout: auto; }}
+    th, td {{ border: 1px solid #D8DEE4; padding: 4px 5px; vertical-align: top; white-space: nowrap; }}
+    th:nth-child(3), td:nth-child(3),
+    th:nth-child(4), td:nth-child(4),
+    th:nth-child(12), td:nth-child(12) {{ white-space: normal; min-width: 32mm; max-width: 62mm; }}
+    th {{ background: #F5FAFC; text-align: left; }}
+    tr {{ break-inside: avoid; page-break-inside: avoid; }}
+    @page {{ size: A4 landscape; margin: 10mm; }}
+</style>
+</head>
+<body>
+<h1>Bereinigungsliste</h1>
+<p>{druck_infos_html}</p>
+{druckliste_export.to_html(index=False, escape=True)}
+</body>
+</html>
+"""
+
+    with col1:
+        dl1, dl2 = st.columns(2)
+        with dl1:
+            st.download_button(
+                "Kompakte Druckliste HTML",
+                data=druck_html.encode("utf-8"),
+                file_name="bereinigungsliste_kompakt.html",
+                mime="text/html",
+                use_container_width=True,
+            )
+        with dl2:
+            st.download_button(
+                "Kompakte Druckliste CSV",
+                data=druckliste_export.to_csv(index=False, sep=";").encode("utf-8-sig"),
+                file_name="bereinigungsliste_kompakt.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
 
     with col3:
         page_size = st.selectbox(
@@ -560,8 +695,12 @@ with st.expander("📋 Liste: Bereinigungskandidaten"):
     ]
     spalten = [c for c in spalten if c in score.columns]
     page_df = score.iloc[start:ende]
+    page_df_display = page_df[spalten].copy()
+    if "Band" in page_df_display.columns:
+        page_df_display["Band"] = page_df.apply(formatiere_band_position, axis=1).tolist()
+
     event=st.dataframe(
-        page_df[spalten], 
+        page_df_display, 
         key =f"bereinigung_{st.session_state.table_key}",
         use_container_width=True,
         hide_index=True,

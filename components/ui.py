@@ -1,8 +1,24 @@
 import streamlit as st
 import pandas as pd
 import textwrap
+from pathlib import Path
+import base64
+import html
+from src.theme import (
+    PRIMARY,
+    MUTED,
+    BORDER,
+    CARD_BG,
+    SURFACE_MUTED,
+    COLOR_PLACEHOLDER_BG,
+    COLOR_PLACEHOLDER_TEXT,
+    COLOR_NEUTRAL,
+)
 
-def kpi_box(title, current, previous=None, previous_label="Vorjahr gesamt", suffix="", subtext=None, color="#264653"):
+def _html_value(value):
+    return html.escape("" if value is None else str(value))
+
+def kpi_box(title, current, previous=None, previous_label="Vorjahr gesamt", suffix="", subtext=None, color=PRIMARY):
     if isinstance(previous, (int, float)):
         previous_text = f"{previous_label}: {previous:,}".replace(",", "'")
     elif previous is not None:
@@ -28,18 +44,28 @@ def kpi_box(title, current, previous=None, previous_label="Vorjahr gesamt", suff
         info.append(subtext)
 
     previous_block = ""
-    if info:
-        previous_block = (
-            '<div style="font-size:13px;color:#666;margin-top:8px;line-height:1.4;">'
-            + "<br>".join(info)
-            + "</div>"
-        )
+    info_text = "<br>".join(_html_value(item) for item in info) if info else "&nbsp;"
+    safe_title = _html_value(title)
+    safe_current_text = _html_value(current_text)
+
+    previous_block = (
+        f'<div style="'
+        f'font-size:13px;'
+        f'color:{MUTED};'
+        f'margin-top:8px;'
+        f'line-height:1.4;'
+        f'min-height:20px;'
+        f'">'
+        f'{info_text}'
+        f'</div>'
+    )
    
     html=(
-        '<div style="border:1px solid #E6E6E6;border-radius:12px;padding:15px;'
-        'background:white;box-shadow:0 2px 6px rgba(0,0,0,0.05);">'
-        f'<div style="font-size:14px;color:#666;">{title}</div>'
-        f'<div style="font-size:32px;font-weight:700;color:{color};">{current_text}</div>'
+        f'<div style="border:1px solid {BORDER};border-radius:12px;padding:15px;'
+        f'background:{CARD_BG};box-shadow:0 2px 6px rgba(0,0,0,0.05);'
+        f'min-height:130px;box-sizing:border-box;">'
+        f'<div style="font-size:14px;color:{MUTED};min-height:42px;line-height:1.4;">{safe_title}</div>'
+        f'<div style="font-size:32px;font-weight:700;color:{color};">{safe_current_text}</div>'
         f'{previous_block}'
         '</div>'
     )
@@ -50,7 +76,7 @@ def show_media_detail(buch, farben):
         st.info("👉 Wählen Sie zuerst ein Medium aus.")
         return
     bewertung = buch.get("Bereinigung", None)
-    badge_farbe = farben.get(bewertung, "#888888")
+    badge_farbe = farben.get(bewertung, COLOR_NEUTRAL)
 
     letzte_ausleihe_dt = buch.get("Letzte_Ausleihe", pd.NaT)
     if pd.notna(letzte_ausleihe_dt):
@@ -71,29 +97,47 @@ def show_media_detail(buch, farben):
             else:
                 st.markdown(
                     "<div style='width:170px;height:230px;"
-                    "background:#f0f0f0;border-radius:8px;"
+                    f"background:{COLOR_PLACEHOLDER_BG};border-radius:8px;"
                     "display:flex;align-items:center;justify-content:center;"
-                    "color:#999;font-size:0.85em;text-align:center;'>"
+                    f"color:{COLOR_PLACEHOLDER_TEXT};font-size:0.85em;text-align:center;'>"
                     "📕<br>Kein Cover</div>",
                     unsafe_allow_html=True
                 )
+            # NR Zugang unterhalb des Covers
+            nr_zugang = buch.get("NR Zugang", "-")
+            nr_zugang_html = _html_value(nr_zugang)
+
+            st.markdown(
+                f"""
+                <div style="
+                    width:170px;
+                    text-align:center;
+                    margin-top:6px;
+                    font-size:0.8rem;
+                    color:{MUTED};
+                ">
+                    Zugangsnummer: <strong>{nr_zugang_html}</strong>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
         with col_info:
-            st.markdown(f"#### {buch.get('Titel', '-')}")
+            st.markdown(f"#### {_html_value(buch.get('Titel', '-'))}")
             autor = buch.get("Verfasser I(1)", "")
             if autor and str(autor).strip():
-                st.markdown(f"<span style='color:#666;'>{autor}</span>", unsafe_allow_html=True)
+                st.markdown(f"<span style='color:{MUTED};'>{_html_value(autor)}</span>", unsafe_allow_html=True)
 
             st.markdown(
                 f"<span style='background-color:{badge_farbe}22; "
                 f"color:{badge_farbe}; padding:4px 12px; border-radius:14px; "
-                f"font-size:0.85em; font-weight:600;'>{bewertung}</span>"
+                f"font-size:0.85em; font-weight:600;'>{_html_value(bewertung)}</span>"
                 f"&nbsp;&nbsp;"
-                f"<span style='color:#888; font-size:0.85em;'>"
-                f"📍 {buch.get('Standort(1)', '-')} &nbsp;·&nbsp; "
-                f"📚 {buch.get('Medienart', '-')} &nbsp; &nbsp; "
-                f"📅 {buch.get('Aufnahme_Monat_Jahr', '-')} &nbsp; &nbsp; "
-                f"👶 {buch.get('Kategorie Alter', '-')}"
+                f"<span style='color:{MUTED}; font-size:0.85em;'>"
+                f"📍 {_html_value(buch.get('Standort(1)', '-'))} &nbsp;·&nbsp; "
+                f"📚 {_html_value(buch.get('Medienart', '-'))} &nbsp; &nbsp; "
+                f"📅 {_html_value(buch.get('Aufnahme_Monat_Jahr', '-'))} &nbsp; &nbsp; "
+                f"👶 {_html_value(buch.get('Kategorie Alter', '-'))}"
                 f"</span>",
                 unsafe_allow_html=True
             )
@@ -109,11 +153,11 @@ def show_media_detail(buch, farben):
                 if pd.notna(anzahl_baende):
                     median_info = f" . {int(anzahl_baende)} Bände im Bestand"
 
-                reihen_hinweis_html = reihen_hinweis.replace(". ", ".<br>")
+                reihen_hinweis_html = _html_value(reihen_hinweis).replace(". ", ".<br>")
                 st.markdown(
                     f"<div style='margin-top:8px; padding:8px 12px; "
-                    f"background:#f7f7f7; border-radius:8px; font-size:0.85em;'>"
-                    f"📚 <strong>Reihe:</strong> {reihe} (Band {band}){median_info}<br>"
+                    f"background:{SURFACE_MUTED}; border-radius:8px; font-size:0.85em;'>"
+                    f"📚 <strong>Reihe:</strong> {_html_value(reihe)} (Band {_html_value(band)}){_html_value(median_info)}<br>"
                     f"{reihen_hinweis_html}"
                     f"</div>",
                     unsafe_allow_html=True
@@ -131,12 +175,12 @@ def show_media_detail(buch, farben):
             st.caption(f"🕓 Letzte Ausleihe: {letzte_ausleihe_text}")
 
             st.markdown(
-                f"<span style='color:#888; font-size:0.8em;'>"
+                f"<span style='color:{MUTED}; font-size:0.8em;'>"
                 f"Score-Zusammensetzung: "
-                f"Nutzung {buch.get('Score_Nutzung', '-')} · "
-                f"Aktualität {buch.get('Score_Aktualitaet', '-')} · "
-                f"Alter {buch.get('Score_Alter', '-')} · "
-                f"Trend {buch.get('Score_Trend', '-')}"
+                f"Nutzung {_html_value(buch.get('Score_Nutzung', '-'))} · "
+                f"Aktualität {_html_value(buch.get('Score_Aktualitaet', '-'))} · "
+                f"Alter {_html_value(buch.get('Score_Alter', '-'))} · "
+                f"Trend {_html_value(buch.get('Score_Trend', '-'))}"
                 f"</span>",
                 unsafe_allow_html=True
             )
@@ -162,9 +206,9 @@ def show_new_acquisition_detail(buch):
             else:
                 st.markdown(
                     "<div style='width:170px;height:230px;"
-                    "background:#f0f0f0;border-radius:8px;"
+                    f"background:{COLOR_PLACEHOLDER_BG};border-radius:8px;"
                     "display:flex;align-items:center;justify-content:center;"
-                    "color:#999;font-size:0.85em;text-align:center;'>"
+                    f"color:{COLOR_PLACEHOLDER_TEXT};font-size:0.85em;text-align:center;'>"
                     "📕<br>Kein Cover</div>",
                     unsafe_allow_html=True
                 )
@@ -175,14 +219,14 @@ def show_new_acquisition_detail(buch):
         with col_info:
 
             st.markdown(
-                f"#### {buch.get('Titel', '-')}"
+                f"#### {_html_value(buch.get('Titel', '-'))}"
             )
 
             autor = buch.get("Verfasser I(1)", "")
 
             if autor and str(autor).strip():
                 st.markdown(
-                    f"<span style='color:#666;'>{autor}</span>",
+                    f"<span style='color:{MUTED};'>{_html_value(autor)}</span>",
                     unsafe_allow_html=True
                 )
 
@@ -200,8 +244,8 @@ def show_new_acquisition_detail(buch):
                     reihe_text += f" · Band {band}"
 
                 st.markdown(
-                    f"<span style='color:#888;'>"
-                    f"📚 {reihe_text}"
+                    f"<span style='color:{MUTED};'>"
+                    f"📚 {_html_value(reihe_text)}"
                     f"</span>",
                     unsafe_allow_html=True
                 )
@@ -233,12 +277,12 @@ def show_new_acquisition_detail(buch):
                 aufnahme_text = "-"
 
             st.markdown(
-                f"<span style='color:#888; font-size:0.85em;'>"
-                f"📦 <strong>Lieferant:</strong> {lieferant}"
+                f"<span style='color:{MUTED}; font-size:0.85em;'>"
+                f"📦 <strong>Lieferant:</strong> {_html_value(lieferant)}"
                 f"&nbsp;&nbsp;·&nbsp;&nbsp;"
-                f"💰 <strong>Preis:</strong> {preis_text}"
+                f"💰 <strong>Preis:</strong> {_html_value(preis_text)}"
                 f"&nbsp;&nbsp;·&nbsp;&nbsp;"
-                f"📅 <strong>Aufnahme:</strong> {aufnahme_text}"
+                f"📅 <strong>Aufnahme:</strong> {_html_value(aufnahme_text)}"
                 f"</span>",
                 unsafe_allow_html=True
             )
@@ -283,3 +327,69 @@ def show_new_acquisition_detail(buch):
                 "Die Ausleihzahl bezieht sich auf den aktuell "
                 "gefilterten Zeitraum."
             )
+def title_with_icon(
+    title,
+    icon,
+    icon_size=52,
+    gap=10,
+    level="title",
+):
+    styles = {
+        "title": {
+            "font_size": "2.75rem",
+            "font_weight": "700",
+            "line_height": "1.15",
+            "margin_bottom": "0.5rem",
+        },
+        "header": {
+            "font_size": "2rem",
+            "font_weight": "700",
+            "line_height": "1.2",
+            "margin_bottom": "0.45rem",
+        },
+        "subheader": {
+            "font_size": "1.55rem",
+            "font_weight": "600",
+            "line_height": "1.25",
+            "margin_bottom": "0.35rem",
+        },
+    }
+    style = styles.get(level, styles["title"])
+
+    svg = Path(icon).read_text(encoding="utf-8")
+    svg_b64 = base64.b64encode(
+        svg.encode("utf-8")
+    ).decode("utf-8")
+
+    safe_title = html.escape(title)
+
+    st.html(
+        f"""
+        <div style="
+            display:flex;
+            align-items:center;
+            gap:{gap}px;
+            margin:0 0 {style["margin_bottom"]} 0;
+        ">
+            <img
+                src="data:image/svg+xml;base64,{svg_b64}"
+                style="
+                    width:{icon_size}px;
+                    height:{icon_size}px;
+                    object-fit:contain;
+                    flex-shrink:0;
+                "
+            />
+
+            <div style="
+                font-size:{style["font_size"]};
+                font-weight:{style["font_weight"]};
+                line-height:{style["line_height"]};
+                margin:0;
+                padding:0;
+            ">
+                {safe_title}
+            </div>
+        </div>
+        """
+    )

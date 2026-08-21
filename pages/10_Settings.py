@@ -1,11 +1,15 @@
 import json
 from pathlib import Path
+from components.icons import EINSTELLUNGEN
+from components.ui import title_with_icon
+from src.theme import COLOR_HOLIDAY
 
 import streamlit as st
 
 
-st.set_page_config(page_title="Einstellungen", page_icon="⚙️", layout="wide")
-st.title("⚙️ Einstellungen")
+st.set_page_config(page_title="Einstellungen", page_icon="assets/einstellungen.svg", layout="wide")
+title_with_icon("Einstellungen", EINSTELLUNGEN)
+
 col1,col2 = st.columns([7,1])
 with col1:
     
@@ -94,7 +98,7 @@ with st.expander("Ferien / Saisonzeiten"):
         neues_ende = st.number_input("End-KW", 1, 53, 1)
 
     with c4:
-        neue_farbe = st.color_picker("Farbe", "#B4F0FF")
+        neue_farbe = st.color_picker("Farbe", COLOR_HOLIDAY)
 
     with c5:
         if st.button("➕ Ferien hinzufügen"):
@@ -150,7 +154,7 @@ with st.expander("Ferien / Saisonzeiten"):
         with c4:
             ferien[i]["farbe"] = st.color_picker(
                 "Farbe",
-                value=eintrag.get("farbe", "#B4F0FF"),
+                value=eintrag.get("farbe", COLOR_HOLIDAY),
                 key=f"farbe_{i}",
             )
 
